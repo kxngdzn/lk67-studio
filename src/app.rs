@@ -1146,7 +1146,7 @@ impl App {
 
         ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
             ui.label(
-                egui::RichText::new("v0.1.0  placeholder protocol")
+                egui::RichText::new(concat!("v", env!("CARGO_PKG_VERSION")))
                     .size(9.5)
                     .color(theme::MUTED),
             );

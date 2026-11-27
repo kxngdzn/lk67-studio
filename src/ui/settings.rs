@@ -187,10 +187,14 @@ pub fn draw(app: &mut App, ui: &mut egui::Ui) {
 
     ui.add_space(8.0);
     theme::card(ui, "About / limitations", |ui| {
-        ui.label(RichText::new("LK67 Studio 0.1.0").size(13.0).strong());
+        ui.label(
+            RichText::new(concat!("LK67 Studio ", env!("CARGO_PKG_VERSION")))
+                .size(13.0)
+                .strong(),
+        );
         theme::hint(
             ui,
-            "HID report IDs, matrix indices and packet layout are documented placeholders in src/driver/lk67.rs. Everything works in dry-run until they are confirmed against your board.",
+            "HID report IDs, matrix slots and packet layout are implemented for the yc500 firmware in src/driver/lk67.rs. Dry-run stays the default until you select your board.",
         );
         theme::hint(
             ui,
