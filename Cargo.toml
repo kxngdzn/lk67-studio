@@ -1,6 +1,6 @@
 [package]
 name = "lk67-studio"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "RGB lighting, remap and macro studio for the LK67 65% mechanical keyboard"
 license = "MIT"
