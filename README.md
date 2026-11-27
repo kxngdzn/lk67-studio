@@ -215,7 +215,7 @@ profile, settings and UI preferences. Saves are debounced (~1 s) and written via
 
 ## Troubleshooting
 
-* `HID write failed: ... (0x00000005)` / "Toegang geweigerd" or `(0x00000001)` / "Onjuiste functie" —
+* `HID write failed: ... (0x00000005)` / "Access denied" or `(0x00000001)` / "Incorrect function" —
   the selected collection has no writable report (standard collection, or input-only vendor
   `0xFFFF/0001`) or the transport is output. Pick a row marked **VENDOR** with a feature report
   (`0xFFFF/0002`, interface 2) and keep **Transport** on *Feature report*.
