@@ -21,6 +21,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::model::action::Action;
+pub use crate::model::layout::KEY_SLOTS;
 use crate::model::layout::Layout;
 use crate::model::lighting::{Direction, Lighting, LightingMode, MusicVisual};
 
@@ -233,7 +234,7 @@ fn empty_data() -> [u8; REPORT_DATA_LEN] {
     [0u8; REPORT_DATA_LEN]
 }
 
-fn direction_option(direction: Direction) -> u8 {
+pub(crate) fn direction_option(direction: Direction) -> u8 {
     match direction {
         Direction::Right | Direction::Clockwise => 0,
         Direction::Left | Direction::CounterClockwise => 1,
@@ -248,7 +249,7 @@ fn direction_option(direction: Direction) -> u8 {
 /// equivalent reuse the closest firmware animation. Music and screen modes
 /// are rendered by the firmware from a host stream, so they pick modes 20/22
 /// and 21 instead of the flash-backed user-picture mode 13.
-fn wire_mode(lighting: &Lighting) -> u8 {
+pub(crate) fn wire_mode(lighting: &Lighting) -> u8 {
     match lighting.mode {
         LightingMode::Custom => return 13, // USERPIC per-key picture
         LightingMode::Music => {
@@ -280,11 +281,11 @@ fn wire_mode(lighting: &Lighting) -> u8 {
     }
 }
 
-fn uses_direction(effect: usize) -> bool {
+pub(crate) fn uses_direction(effect: usize) -> bool {
     matches!(effect, 3 | 5 | 6 | 7 | 9 | 10 | 11)
 }
 
-fn hardware_rgb(lighting: &Lighting) -> [u8; 3] {
+pub(crate) fn hardware_rgb(lighting: &Lighting) -> [u8; 3] {
     if lighting.effect == 0 {
         return [0, 0, 0];
     }
@@ -570,24 +571,6 @@ pub fn changed_keys(
     }
     out
 }
-
-/// App key index -> firmware matrix slot for the LK67.
-///
-/// Derived from the board's own keymap: slot = column * 6 + row. The last
-/// entry of the app's fourth row is the rotary knob (Play/Pause press), which
-/// the board reports at slot 75. There is no End key on the LK67.
-pub const KEY_SLOTS: [u16; 68] = [
-    // Esc .. Delete (physical row 0 -> matrix row 1)
-    1, 7, 13, 19, 25, 31, 37, 43, 49, 55, 61, 67, 73, 79, 85,
-    // Tab .. PageUp (physical row 1 -> matrix row 2)
-    2, 8, 14, 20, 26, 32, 38, 44, 50, 56, 62, 68, 74, 80, 86,
-    // Caps .. PageDown (physical row 2 -> matrix row 3)
-    3, 9, 15, 21, 27, 33, 39, 45, 51, 57, 63, 69, 81, 87,
-    // LShift .. knob (physical row 3 -> matrix row 4)
-    4, 16, 22, 28, 34, 40, 46, 52, 58, 64, 70, 76, 82, 75,
-    // LCtrl .. Right (physical row 4 -> matrix row 5)
-    5, 11, 17, 41, 65, 71, 77, 83, 88, 89,
-];
 
 /// Number of LEDs the firmware knows.
 pub const LED_SLOTS: usize = USERPIC_KEYS;

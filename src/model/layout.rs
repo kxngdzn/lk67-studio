@@ -1,8 +1,8 @@
 //! The LK67 65% layout: 68 keys on a 16-unit grid (5 rows).
 //!
 //! Key indices are the app's stable identity for LEDs, matrix slots and saved keymaps.
-//! Several indices are firmware placeholders (see `matrix`, `row`, `col`); the physical
-//! geometry is what the UI draws and what the user sees, so keep those stable.
+//! The physical geometry is what the UI draws and what the user sees, so keep it stable;
+//! `matrix` carries the firmware's LED slot for each key.
 
 use std::sync::OnceLock;
 
@@ -10,8 +10,22 @@ use crate::model::action::{Action, MediaKey, RgbCommand};
 use crate::model::keycode::KeyCode;
 
 pub const ROWS: usize = 5;
-pub const COLS: usize = 16;
 pub const KEY_COUNT: usize = 68;
+
+/// Firmware LED slot for each key index (`slot = column * 6 + row`).
+/// Derived from the board's factory keymap; the knob press is slot 75.
+pub const KEY_SLOTS: [u16; KEY_COUNT] = [
+    // Esc .. Delete (physical row 0 -> matrix row 1)
+    1, 7, 13, 19, 25, 31, 37, 43, 49, 55, 61, 67, 73, 79, 85,
+    // Tab .. PageUp (physical row 1 -> matrix row 2)
+    2, 8, 14, 20, 26, 32, 38, 44, 50, 56, 62, 68, 74, 80, 86,
+    // Caps .. PageDown (physical row 2 -> matrix row 3)
+    3, 9, 15, 21, 27, 33, 39, 45, 51, 57, 63, 69, 81, 87,
+    // LShift .. knob (physical row 3 -> matrix row 4)
+    4, 16, 22, 28, 34, 40, 46, 52, 58, 64, 70, 76, 82, 75,
+    // LCtrl .. Right (physical row 4 -> matrix row 5)
+    5, 11, 17, 41, 65, 71, 77, 83, 88, 89,
+];
 pub const UNITS_WIDE: f32 = 16.0;
 
 #[derive(Clone, Copy)]
@@ -93,8 +107,18 @@ const ROW_3: &[Spec] = &[
     s("Slash", 1.0, 0xBF),
     s("RShift", 1.75, 0xA1),
     s("Up", 1.0, 0x26),
-    // The LK67 has a rotary knob here, not an End key.
+    // Stock 65% has End here; the LK67's knob takes that slot. Its real place is
+    // the top-right corner, which `RIGHT_COLUMN` below applies.
     s("Knob", 1.0, 0xB3),
+];
+
+/// The board's right-hand column, top to bottom: the knob sits in the top-right
+/// corner with the navigation keys beneath it.
+const RIGHT_COLUMN: [(&str, f32); 4] = [
+    ("Knob", 0.0),
+    ("Delete", 1.0),
+    ("PageUp", 2.0),
+    ("PageDown", 3.0),
 ];
 
 const ROW_4: &[Spec] = &[
@@ -121,9 +145,7 @@ pub struct KeyDef {
     pub y: f32,
     pub w: f32,
     pub h: f32,
-    pub row: u8,
-    pub col: u8,
-    /// Placeholder firmware matrix slot. Adjust with `driver::lk67::DriverConfig`.
+    /// Firmware LED slot (`slot = column * 6 + row`).
     pub matrix: u16,
 }
 
@@ -140,7 +162,7 @@ impl Layout {
         let rows: [&[Spec]; ROWS] = [ROW_0, ROW_1, ROW_2, ROW_3, ROW_4];
         for (row, specs) in rows.iter().enumerate() {
             let mut x = 0.0f32;
-            for (col, spec) in specs.iter().enumerate() {
+            for spec in specs.iter() {
                 keys.push(KeyDef {
                     index: keys.len(),
                     code: spec.code,
@@ -149,15 +171,22 @@ impl Layout {
                     y: row as f32,
                     w: spec.width,
                     h: 1.0,
-                    row: row as u8,
-                    col: col as u8,
-                    // 16-column matrix is a placeholder for the real LK67 wiring.
-                    matrix: (row as u16) * COLS as u16 + col as u16,
+                    matrix: KEY_SLOTS[keys.len()],
                 });
                 x += spec.width;
             }
         }
         debug_assert_eq!(keys.len(), KEY_COUNT);
+        // The row tables stay in stock 65% order because a key's index is its LED
+        // slot and its keymap storage, so the column is corrected here instead.
+        for (code, y) in RIGHT_COLUMN {
+            let key = keys
+                .iter_mut()
+                .find(|key| key.code == code)
+                .expect("right-hand column key");
+            key.x = UNITS_WIDE - key.w;
+            key.y = y;
+        }
         Layout {
             keys,
             width: UNITS_WIDE,
@@ -303,5 +332,37 @@ mod tests {
         }
         assert_eq!(layout.default_normal().len(), KEY_COUNT);
         assert_eq!(layout.default_func().len(), KEY_COUNT);
+    }
+
+    #[test]
+    fn right_column_runs_knob_then_navigation() {
+        let layout = layout();
+        let at = |code: &str| {
+            let key = layout
+                .keys
+                .iter()
+                .find(|key| key.code == code)
+                .unwrap_or_else(|| panic!("{code} missing"));
+            (key.x, key.y)
+        };
+        assert_eq!(
+            at("Knob"),
+            (15.0, 0.0),
+            "the knob is in the top-right corner"
+        );
+        assert_eq!(at("Delete"), (15.0, 1.0));
+        assert_eq!(at("PageUp"), (15.0, 2.0));
+        assert_eq!(at("PageDown"), (15.0, 3.0));
+    }
+
+    #[test]
+    fn every_key_has_a_unique_firmware_slot() {
+        let mut seen = [false; 128];
+        for key in &layout().keys {
+            let slot = key.matrix as usize;
+            assert!(slot < seen.len(), "slot {slot} is outside the LED buffer");
+            assert!(!seen[slot], "slot {slot} is used by two keys");
+            seen[slot] = true;
+        }
     }
 }

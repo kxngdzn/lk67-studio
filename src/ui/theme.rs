@@ -100,14 +100,7 @@ pub fn card_fill<R>(
 }
 
 pub fn hint(ui: &mut egui::Ui, text: impl Into<String>) {
-    ui.add(
-        egui::Label::new(
-            egui::RichText::new(text.into())
-                .size(11.0)
-                .color(MUTED),
-        )
-        .wrap(),
-    );
+    ui.add(egui::Label::new(egui::RichText::new(text.into()).size(11.0).color(MUTED)).wrap());
 }
 
 pub fn badge(ui: &mut egui::Ui, text: &str, color: Color32) {

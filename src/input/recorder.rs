@@ -75,20 +75,18 @@ impl Recorder {
 
     /// End the recording and hand the captured steps to the caller.
     pub fn finish(&self) -> Option<RecordingSnapshot> {
-        self.lock()
-            .take()
-            .map(|session| {
-                debug_recorder(&format!(
-                    "record stop steps={} events={}",
-                    session.steps.len(),
-                    session.events
-                ));
-                RecordingSnapshot {
-                    macro_id: session.macro_id,
-                    steps: session.steps,
-                    events: session.events,
-                }
-            })
+        self.lock().take().map(|session| {
+            debug_recorder(&format!(
+                "record stop steps={} events={}",
+                session.steps.len(),
+                session.events
+            ));
+            RecordingSnapshot {
+                macro_id: session.macro_id,
+                steps: session.steps,
+                events: session.events,
+            }
+        })
     }
 
     pub fn active_id(&self) -> Option<u64> {
@@ -198,7 +196,9 @@ mod tests {
             snapshot.steps.first(),
             Some(MacroStep::Down { key, .. }) if key.vk() == 0x41
         ));
-        assert!(matches!(snapshot.steps.get(1), Some(MacroStep::Up { key, .. }) if key.vk() == 0x41));
+        assert!(
+            matches!(snapshot.steps.get(1), Some(MacroStep::Up { key, .. }) if key.vk() == 0x41)
+        );
 
         assert!(recorder.start(8));
         assert_eq!(recorder.active_id(), Some(8));

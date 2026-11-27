@@ -8,10 +8,13 @@ use eframe::egui;
 
 use crate::driver::{DeviceStatus, HidRecord, KeyboardDriver, Lk67Driver};
 use crate::input::{
-    HookCommand, HookConfig, HookHandle, MacroPlayer, PlayerStatus, RawKeyEvent, start_hook,
+    HookCommand, HookConfig, HookHandle, KnobEvent, KnobWatcher, MacroPlayer, PlayerStatus,
+    RawKeyEvent, start_hook,
 };
+use crate::model::action::RgbCommand;
 use crate::model::layout::{KEY_COUNT, layout};
 use crate::model::lighting::{AudioSource, LightingMode, ScreenConfig};
+use crate::model::profile::KnobTurn;
 use crate::model::{Action, Config, Layer};
 use crate::rgb::{
     AudioEngine, AudioSnapshot, KeyActivity, LiveInputs, RgbEngine, ScreenEngine, ScreenSnapshot,
@@ -27,6 +30,7 @@ pub struct App {
     pub audio: AudioEngine,
     pub screen: ScreenEngine,
     pub hook: HookHandle,
+    pub knob: KnobWatcher,
     pub player: MacroPlayer,
     pub colors: Vec<[u8; 3]>,
     pub ui: UiState,
@@ -76,6 +80,7 @@ impl App {
 
         let player = MacroPlayer::new();
         let hook = start_hook(HookConfig::build(&cfg.settings, cfg.profile()), &player);
+        let knob = crate::input::knob::start(cfg.driver.vid, cfg.driver.pid);
         hook.recorder.set_repaint_context(cc.egui_ctx.clone());
         let mut driver = Lk67Driver::new(cfg.driver.clone(), cfg.settings.dry_run);
         if !cfg.settings.dry_run {
@@ -103,6 +108,7 @@ impl App {
             audio: AudioEngine::new(),
             screen: ScreenEngine::new(),
             hook,
+            knob,
             player,
             colors: vec![[0, 0, 0]; KEY_COUNT],
             ui,
@@ -129,7 +135,8 @@ impl App {
         app.ui.apply_lighting = true;
         app.tray = crate::tray::build(&cc.egui_ctx, app.quitting.clone());
         if app.tray.is_none() {
-            app.ui.notify("Tray icon unavailable; the window closes normally");
+            app.ui
+                .notify("Tray icon unavailable; the window closes normally");
         }
         app
     }
@@ -210,7 +217,8 @@ impl App {
             return;
         }
         if self.cfg.settings.dry_run {
-            self.ui.notify("Dry-run is enabled: the onboard keymap is not read or written");
+            self.ui
+                .notify("Dry-run is enabled: the onboard keymap is not read or written");
             return;
         }
         let cfg = self.cfg.driver.clone();
@@ -229,9 +237,11 @@ impl App {
         if let Err(err) = spawned {
             self.restore_rx = None;
             self.ui.restoring = false;
-            self.ui.notify(format!("Could not start keymap restore: {err}"));
+            self.ui
+                .notify(format!("Could not start keymap restore: {err}"));
         } else {
-            self.ui.notify("Clearing onboard remaps in the background...");
+            self.ui
+                .notify("Clearing onboard remaps in the background...");
         }
     }
 
@@ -242,7 +252,8 @@ impl App {
     /// the main driver pauses lighting writes until the job reports back.
     pub fn upload_custom_layout(&mut self) {
         if self.ui.lighting_uploading {
-            self.ui.notify("A per-key picture upload is already running");
+            self.ui
+                .notify("A per-key picture upload is already running");
             return;
         }
         // Sending the picture is also the request to show it, so the profile and
@@ -252,12 +263,14 @@ impl App {
         profile.lighting.animation_playing = false;
         let lighting = profile.lighting.clone();
         self.ui.dirty = true;
-        let pages = crate::driver::lk67::build_key_color_reports(&self.cfg.driver, &lighting.custom.keys).len();
+        let pages =
+            crate::driver::lk67::build_key_color_reports(&self.cfg.driver, &lighting.custom.keys)
+                .len();
         if self.cfg.settings.dry_run {
             match self.driver.upload_custom_layout(&lighting) {
-                Ok(count) => self
-                    .ui
-                    .notify(format!("Dry-run: {count} packet(s) logged, nothing written")),
+                Ok(count) => self.ui.notify(format!(
+                    "Dry-run: {count} packet(s) logged, nothing written"
+                )),
                 Err(err) => self.ui.notify(format!("Per-key upload failed: {err}")),
             }
             return;
@@ -278,11 +291,11 @@ impl App {
         if let Err(err) = spawned {
             self.upload_rx = None;
             self.ui.lighting_uploading = false;
-            self.ui.notify(format!("Could not start the picture upload: {err}"));
+            self.ui
+                .notify(format!("Could not start the picture upload: {err}"));
         } else {
-            self.ui.notify(format!(
-                "Sending per-key picture ({pages} pages, ~3 s)..."
-            ));
+            self.ui
+                .notify(format!("Sending per-key picture ({pages} pages, ~3 s)..."));
         }
     }
 
@@ -338,9 +351,7 @@ impl App {
     /// Apply an RGB command coming from a key assignment or a hotkey.
     pub fn rgb_command(&mut self, code: u8) {
         // Effect cycling is invisible while music/screen frames own the LEDs.
-        if matches!(code, 0 | 1)
-            && self.cfg.profile().lighting.mode != LightingMode::Hardware
-        {
+        if matches!(code, 0 | 1) && self.cfg.profile().lighting.mode != LightingMode::Hardware {
             self.cfg.profile_mut().lighting.mode = LightingMode::Hardware;
             self.ui.audio_requested = false;
             self.ui.screen_requested = false;
@@ -349,10 +360,37 @@ impl App {
         match code {
             0 => lighting.effect = (lighting.effect + 1) % 13,
             1 => lighting.effect = (lighting.effect + 12) % 13,
-            2 => lighting.brightness = (lighting.brightness + 10).min(100),
-            3 => lighting.brightness = lighting.brightness.saturating_sub(10),
-            4 => lighting.speed = (lighting.speed + 10).min(100),
-            5 => lighting.speed = lighting.speed.saturating_sub(10),
+            // The firmware takes five brightness/speed levels (0..=4 / 1..=5),
+            // so a 10-point step often left the wire byte unchanged and the knob
+            // felt dead for several clicks. One step per level always shows.
+            2 => {
+                let next = (lighting.brightness + 25).min(100);
+                if next == lighting.brightness {
+                    return;
+                }
+                lighting.brightness = next;
+            }
+            3 => {
+                let next = lighting.brightness.saturating_sub(25);
+                if next == lighting.brightness {
+                    return;
+                }
+                lighting.brightness = next;
+            }
+            4 => {
+                let next = (lighting.speed + 25).min(100);
+                if next == lighting.speed {
+                    return;
+                }
+                lighting.speed = next;
+            }
+            5 => {
+                let next = lighting.speed.saturating_sub(25);
+                if next == lighting.speed {
+                    return;
+                }
+                lighting.speed = next;
+            }
             6 => {
                 if lighting.brightness > 0 {
                     lighting.brightness = 0;
@@ -510,6 +548,63 @@ impl App {
         }
     }
 
+    /// Apply one knob detent. Windows already handled the same consumer report
+    /// as a volume step, so LED modes send the opposite step to cancel it.
+    fn knob_turn(&mut self, up: bool) {
+        self.ui.knob_turn_at = Some(Instant::now());
+        let command = match self.cfg.settings.knob_turn {
+            KnobTurn::Volume => return,
+            KnobTurn::Brightness => {
+                if up {
+                    RgbCommand::BrightnessUp
+                } else {
+                    RgbCommand::BrightnessDown
+                }
+            }
+            KnobTurn::Speed => {
+                if up {
+                    RgbCommand::SpeedUp
+                } else {
+                    RgbCommand::SpeedDown
+                }
+            }
+            KnobTurn::Effects => {
+                if up {
+                    RgbCommand::NextEffect
+                } else {
+                    RgbCommand::PrevEffect
+                }
+            }
+        };
+        let before = {
+            let lighting = &self.cfg.profile().lighting;
+            (
+                lighting.brightness,
+                lighting.speed,
+                lighting.effect,
+                lighting.mode,
+            )
+        };
+        self.rgb_command(crate::input::hook::rgb_command_code(command));
+        let after = {
+            let lighting = &self.cfg.profile().lighting;
+            (
+                lighting.brightness,
+                lighting.speed,
+                lighting.effect,
+                lighting.mode,
+            )
+        };
+        if before != after {
+            // The board blanks for about half a second while it applies an LEDPARAM
+            // write. Coalesce a burst of detents into the write that follows the
+            // last one instead of stalling on every click.
+            self.ui.apply_lighting = false;
+            self.ui.lighting_edit_at = Some(Instant::now());
+        }
+        crate::input::inject::tap_key(if up { 0xAE } else { 0xAF });
+    }
+
     fn handle_command(&mut self, command: HookCommand) {
         match command {
             HookCommand::SwitchProfile(slot) => self.switch_profile(slot as usize),
@@ -525,6 +620,15 @@ impl App {
             .clamp(0.0, 0.1);
         self.last_frame = now;
 
+        while let Ok(event) = self.knob.events.try_recv() {
+            match event {
+                KnobEvent::Up => self.knob_turn(true),
+                KnobEvent::Down => self.knob_turn(false),
+                KnobEvent::Unavailable(message) => self
+                    .ui
+                    .notify(format!("Knob rotation unavailable: {message}")),
+            }
+        }
         while let Ok(event) = self.hook.events.try_recv() {
             self.handle_event(event);
         }
@@ -574,7 +678,8 @@ impl App {
                 Err(TryRecvError::Disconnected) => {
                     self.restore_rx = None;
                     self.ui.restoring = false;
-                    self.ui.notify("Onboard keymap restore thread stopped unexpectedly");
+                    self.ui
+                        .notify("Onboard keymap restore thread stopped unexpectedly");
                 }
             }
         }
@@ -585,7 +690,8 @@ impl App {
                 Ok(Ok(count)) => {
                     self.upload_rx = None;
                     self.ui.lighting_uploading = false;
-                    self.ui.notify(format!("Per-key picture written ({count} packets)"));
+                    self.ui
+                        .notify(format!("Per-key picture written ({count} packets)"));
                 }
                 Ok(Err(err)) => {
                     self.upload_rx = None;
@@ -658,7 +764,6 @@ impl App {
         // Render the current lighting frame.
         {
             let live = LiveInputs {
-                activity: &self.activity,
                 audio: &self.audio_snap,
                 screen: &self.screen_snap,
             };
@@ -720,7 +825,8 @@ impl App {
         // heights (mode 20/22) and 0x0E screen colour (mode 21). Neither touches
         // flash, so they can run continuously.
         let mode = self.cfg.profile().lighting.mode;
-        let interval = Duration::from_millis(1000 / self.cfg.settings.stream_fps.clamp(20, 60) as u64);
+        let interval =
+            Duration::from_millis(1000 / self.cfg.settings.stream_fps.clamp(20, 60) as u64);
         if self.ui.stream_to_device
             && !self.ui.lighting_uploading
             && now.duration_since(self.last_stream_at) >= interval

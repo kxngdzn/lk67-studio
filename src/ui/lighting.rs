@@ -86,7 +86,11 @@ fn live_summary(app: &mut App, ui: &mut egui::Ui, mode: LightingMode) {
             };
             theme::badge(
                 ui,
-                if running { "CAPTURING" } else { "NOT CAPTURING" },
+                if running {
+                    "CAPTURING"
+                } else {
+                    "NOT CAPTURING"
+                },
                 if running { theme::OK } else { theme::WARN },
             );
             let (label, page) = match mode {
@@ -148,89 +152,94 @@ fn hardware(app: &mut App, ui: &mut egui::Ui, index: usize) {
         });
 
         let left_height = cols[0].min_rect().height();
-        theme::card_fill(&mut cols[1], "Palette, brightness and motion", left_height, |ui| {
-            let driver_cfg = app.cfg.driver.clone();
-            let lighting = &mut app.cfg.profiles[index].lighting;
-            ui.horizontal(|ui| {
-                ui.label("Primary colour");
-                ui.color_edit_button_srgb(&mut lighting.colors[0]);
-                theme::hint(
-                    ui,
-                    "Slot 1 is the primary colour for single-colour effects.",
-                );
-            });
-            ui.add_space(2.0);
-            if widgets::palette_editor(ui, &mut lighting.colors) {
-                app.ui.dirty = true;
-            }
-            if let Some(slot) =
-                widgets::palette_swatches(ui, &lighting.colors, app.ui.palette_index)
-            {
-                app.ui.palette_index = slot;
-                app.ui.paint_color = lighting.colors[slot];
-            }
-            ui.add_space(4.0);
-            if widgets::slider_percent(ui, "Brightness", &mut lighting.brightness) {
-                app.ui.dirty = true;
-            }
-            if widgets::slider_percent(ui, "Speed", &mut lighting.speed) {
-                app.ui.dirty = true;
-            }
-            ui.horizontal(|ui| {
-                ui.label("Direction");
-                egui::ComboBox::from_id_salt("light-dir")
-                    .selected_text(lighting.direction.label())
-                    .width(190.0)
-                    .show_ui(ui, |ui| {
-                        for direction in Direction::ALL {
-                            if ui
-                                .selectable_value(
-                                    &mut lighting.direction,
-                                    direction,
-                                    direction.label(),
-                                )
-                                .clicked()
-                            {
-                                ui.close();
-                            }
-                        }
-                    });
-            });
-            ui.add_space(4.0);
-            let effect = &HARDWARE_EFFECTS[lighting.effect];
-            theme::hint(
-                ui,
-                format!(
-                    "{} - {}{}",
-                    lighting.effect_def().name,
-                    if effect.animated {
-                        "animated: speed and direction apply"
-                    } else {
-                        "static: speed and direction are ignored"
-                    },
-                    if effect.uses_color {
-                        ", palette colours used"
-                    } else {
-                        ""
-                    }
-                ),
-            );
-            let report = lk67::build_effect_report(&driver_cfg, lighting);
-            theme::hint(
-                ui,
-                format!(
-                    "Packet ({} bytes): {}",
-                    report.len(),
-                    widgets::truncate(&lk67::hex_dump(&report), 64)
-                ),
-            );
-            ui.horizontal(|ui| {
-                if ui.button("Reset palette").clicked() {
-                    lighting.colors = crate::model::lighting::default_palette();
+        theme::card_fill(
+            &mut cols[1],
+            "Palette, brightness and motion",
+            left_height,
+            |ui| {
+                let driver_cfg = app.cfg.driver.clone();
+                let lighting = &mut app.cfg.profiles[index].lighting;
+                ui.horizontal(|ui| {
+                    ui.label("Primary colour");
+                    ui.color_edit_button_srgb(&mut lighting.colors[0]);
+                    theme::hint(
+                        ui,
+                        "Slot 1 is the primary colour for single-colour effects.",
+                    );
+                });
+                ui.add_space(2.0);
+                if widgets::palette_editor(ui, &mut lighting.colors) {
                     app.ui.dirty = true;
                 }
-            });
-        });
+                if let Some(slot) =
+                    widgets::palette_swatches(ui, &lighting.colors, app.ui.palette_index)
+                {
+                    app.ui.palette_index = slot;
+                    app.ui.paint_color = lighting.colors[slot];
+                }
+                ui.add_space(4.0);
+                if widgets::slider_percent(ui, "Brightness", &mut lighting.brightness) {
+                    app.ui.dirty = true;
+                }
+                if widgets::slider_percent(ui, "Speed", &mut lighting.speed) {
+                    app.ui.dirty = true;
+                }
+                ui.horizontal(|ui| {
+                    ui.label("Direction");
+                    egui::ComboBox::from_id_salt("light-dir")
+                        .selected_text(lighting.direction.label())
+                        .width(190.0)
+                        .show_ui(ui, |ui| {
+                            for direction in Direction::ALL {
+                                if ui
+                                    .selectable_value(
+                                        &mut lighting.direction,
+                                        direction,
+                                        direction.label(),
+                                    )
+                                    .clicked()
+                                {
+                                    ui.close();
+                                }
+                            }
+                        });
+                });
+                ui.add_space(4.0);
+                let effect = &HARDWARE_EFFECTS[lighting.effect];
+                theme::hint(
+                    ui,
+                    format!(
+                        "{} - {}{}",
+                        lighting.effect_def().name,
+                        if effect.animated {
+                            "animated: speed and direction apply"
+                        } else {
+                            "static: speed and direction are ignored"
+                        },
+                        if effect.uses_color {
+                            ", palette colours used"
+                        } else {
+                            ""
+                        }
+                    ),
+                );
+                let report = lk67::build_effect_report(&driver_cfg, lighting);
+                theme::hint(
+                    ui,
+                    format!(
+                        "Packet ({} bytes): {}",
+                        report.len(),
+                        widgets::truncate(&lk67::hex_dump(&report), 64)
+                    ),
+                );
+                ui.horizontal(|ui| {
+                    if ui.button("Reset palette").clicked() {
+                        lighting.colors = crate::model::lighting::default_palette();
+                        app.ui.dirty = true;
+                    }
+                });
+            },
+        );
     });
 }
 

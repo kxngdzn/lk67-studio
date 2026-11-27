@@ -21,10 +21,7 @@ pub fn draw(app: &mut App, ui: &mut egui::Ui) {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             theme::hint(
                 ui,
-                format!(
-                    "{} remapped",
-                    app.cfg.profiles[profile_index].remap_count()
-                ),
+                format!("{} remapped", app.cfg.profiles[profile_index].remap_count()),
             );
         });
     });
@@ -79,7 +76,7 @@ fn knob_card(app: &mut App, ui: &mut egui::Ui, profile_index: usize) {
                 });
             theme::hint(
                 ui,
-                "Volume sends volume keys to Windows. The other modes need software remapping on.",
+                "Volume passes through to Windows. The LED modes read the knob directly and cancel the volume step.",
             );
         });
 
@@ -101,12 +98,6 @@ fn knob_card(app: &mut App, ui: &mut egui::Ui, profile_index: usize) {
 
         if turn != app.cfg.settings.knob_turn {
             app.cfg.settings.knob_turn = turn;
-            // The turn modes only work through software remapping, so selecting
-            // one turns it on instead of silently doing nothing.
-            if turn != KnobTurn::Volume {
-                app.cfg.settings.hook_enabled = true;
-                app.cfg.settings.remap_enabled = true;
-            }
             app.ui.dirty = true;
             app.notify(format!("Knob turn: {}", turn.label()));
         }
@@ -161,7 +152,7 @@ fn selected_card(app: &mut App, ui: &mut egui::Ui, profile_index: usize) {
                     default_layer.summary(&profile.macros),
                 );
                 widgets::kv(ui, "LED index", index.to_string());
-                widgets::kv(ui, "Matrix slot (placeholder)", key.matrix.to_string());
+                widgets::kv(ui, "Matrix slot", key.matrix.to_string());
             });
         ui.add_space(6.0);
         ui.horizontal(|ui| {

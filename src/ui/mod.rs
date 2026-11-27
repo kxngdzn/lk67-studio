@@ -62,7 +62,9 @@ impl Page {
             Page::Remap => "Assign keys, combos and macros on both layers.",
             Page::Lighting => "13 hardware effects, 14-colour palette and custom per-key layouts.",
             Page::Macros => "Record, edit and test key sequences with delays and repeats.",
-            Page::Tester => "Live switch tester: press counts, hold times and a heatmap from real keys.",
+            Page::Tester => {
+                "Live switch tester: press counts, hold times and a heatmap from real keys."
+            }
             Page::Music => "WASAPI loopback or microphone driven by FFT band analysis.",
             Page::Screen => "Map screen colours onto the keyboard (ambilight).",
             Page::Driver => "HID discovery, protocol placeholders and the packet log.",

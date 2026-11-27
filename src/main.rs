@@ -13,6 +13,10 @@ fn main() -> eframe::Result {
         probe();
         return Ok(());
     }
+    if std::env::args().any(|arg| arg == "--knob-probe") {
+        knob_probe();
+        return Ok(());
+    }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("LK67 Studio")
@@ -26,6 +30,76 @@ fn main() -> eframe::Result {
         options,
         Box::new(|cc| Ok(Box::new(app::App::new(cc)))),
     )
+}
+
+/// Watch every consumer/vendor collection of the keyboard and log input reports
+/// for five minutes. Used to identify what the rotary knob actually sends.
+fn knob_probe() {
+    use hidapi::HidApi;
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    let (cfg, _) = model::store::Config::load();
+    let api = match HidApi::new() {
+        Ok(api) => api,
+        Err(err) => {
+            eprintln!("HID init failed: {err}");
+            return;
+        }
+    };
+    let path = model::store::config_dir().join("knobprobe.log");
+    let log = Arc::new(Mutex::new(std::fs::File::create(&path).ok()));
+    let mut readers = 0;
+    for info in api.device_list().filter(|info| {
+        info.vendor_id() == cfg.driver.vid
+            && info.product_id() == cfg.driver.pid
+            && (info.usage_page() == 0x0C || info.usage_page() >= 0xFF00)
+    }) {
+        let label = format!(
+            "if={} usage={:04X}/{:04X}",
+            info.interface_number(),
+            info.usage_page(),
+            info.usage()
+        );
+        match api.open_path(info.path()) {
+            Ok(device) => {
+                let _ = device.set_blocking_mode(true);
+                readers += 1;
+                let log = log.clone();
+                let label = label.clone();
+                std::thread::spawn(move || {
+                    let mut buf = [0u8; 128];
+                    loop {
+                        match device.read_timeout(&mut buf, 250) {
+                            Ok(0) => {}
+                            Ok(n) => {
+                                let line =
+                                    format!("{label}  {}", driver::lk67::hex_dump(&buf[..n]));
+                                eprintln!("{line}");
+                                if let Ok(mut guard) = log.lock()
+                                    && let Some(file) = guard.as_mut()
+                                {
+                                    let _ = writeln!(file, "{line}");
+                                    let _ = file.flush();
+                                }
+                            }
+                            Err(err) => {
+                                eprintln!("{label} read error: {err}");
+                                break;
+                            }
+                        }
+                    }
+                });
+            }
+            Err(err) => eprintln!("{label} open failed: {err}"),
+        }
+    }
+    eprintln!(
+        "watching {readers} collection(s) for 300s; log: {}",
+        path.display()
+    );
+    std::thread::sleep(std::time::Duration::from_secs(300));
+    std::process::exit(0);
 }
 
 /// Open the configured HID device once and print which collection was selected.

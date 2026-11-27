@@ -718,8 +718,7 @@ impl Lk67Driver {
                     if slots.get(slot as usize).copied() == Some(want) {
                         continue;
                     }
-                    let report =
-                        build_keymap_report(&self.cfg, profile, func_layer, slot, default);
+                    let report = build_keymap_report(&self.cfg, profile, func_layer, slot, default);
                     self.write_packet(
                         if func_layer {
                             "FN stock restore"
@@ -837,7 +836,10 @@ impl KeyboardDriver for Lk67Driver {
         if !self.dry_run {
             std::thread::sleep(std::time::Duration::from_millis(2000));
         }
-        self.write_packet("Per-key picture mode", build_effect_report(&self.cfg, lighting))?;
+        self.write_packet(
+            "Per-key picture mode",
+            build_effect_report(&self.cfg, lighting),
+        )?;
         Ok(sent + 1)
     }
 

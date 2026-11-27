@@ -13,9 +13,9 @@ use std::sync::{Arc, OnceLock, RwLock};
 use crate::input::inject::{send_key, send_mods};
 use crate::input::macro_player::{MacroPlayer, PlayerJob};
 use crate::input::recorder::Recorder;
-use crate::model::action::{Action, RgbCommand};
+use crate::model::action::Action;
 use crate::model::layout::{KEY_COUNT, layout};
-use crate::model::profile::{KnobTurn, Profile, Settings};
+use crate::model::profile::{Profile, Settings};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HookAction {
@@ -47,41 +47,6 @@ impl HookAction {
     }
 }
 
-/// The RGB command a knob turn (volume up/down key) should run, when the knob is
-/// configured for something other than plain volume.
-fn knob_turn_command(turn: KnobTurn, vk: u16) -> Option<RgbCommand> {
-    use RgbCommand::*;
-    let up = match vk {
-        0xAF => true,
-        0xAE => false,
-        _ => return None,
-    };
-    Some(match turn {
-        KnobTurn::Volume => return None,
-        KnobTurn::Brightness => {
-            if up {
-                BrightnessUp
-            } else {
-                BrightnessDown
-            }
-        }
-        KnobTurn::Speed => {
-            if up {
-                SpeedUp
-            } else {
-                SpeedDown
-            }
-        }
-        KnobTurn::Effects => {
-            if up {
-                NextEffect
-            } else {
-                PrevEffect
-            }
-        }
-    })
-}
-
 pub fn rgb_command_code(command: crate::model::action::RgbCommand) -> u8 {
     use crate::model::action::RgbCommand::*;
     match command {
@@ -102,7 +67,6 @@ pub struct HookConfig {
     pub remap_enabled: bool,
     pub hotkeys_enabled: bool,
     pub fn_vk: u16,
-    pub knob_turn: KnobTurn,
     pub normal: [HookAction; KEY_COUNT],
     pub func: [HookAction; KEY_COUNT],
     pub index_by_vk: HashMap<u16, usize>,
@@ -115,7 +79,6 @@ impl Default for HookConfig {
             remap_enabled: false,
             hotkeys_enabled: false,
             fn_vk: crate::model::keycode::VK_FN,
-            knob_turn: KnobTurn::Volume,
             normal: [HookAction::PassThrough; KEY_COUNT],
             func: [HookAction::PassThrough; KEY_COUNT],
             index_by_vk: HashMap::new(),
@@ -144,7 +107,6 @@ impl HookConfig {
             remap_enabled: settings.remap_enabled,
             hotkeys_enabled: settings.hotkeys_enabled,
             fn_vk: settings.fn_key_vk,
-            knob_turn: settings.knob_turn,
             normal,
             func,
             index_by_vk,
@@ -304,7 +266,7 @@ fn debug_log(vk: u16, down: bool, flags: u32, extra: usize) {
 fn debug_log(_vk: u16, _down: bool, _flags: u32, _extra: usize) {}
 
 #[cfg(windows)]
-fn debug_note(note: &str) {
+pub(crate) fn debug_note(note: &str) {
     use std::io::Write;
     if std::env::var_os("LK67_DEBUG_KEYS").is_none() {
         return;
@@ -321,7 +283,7 @@ fn debug_note(note: &str) {
 }
 
 #[cfg(not(windows))]
-fn debug_note(_note: &str) {}
+pub(crate) fn debug_note(_note: &str) {}
 
 #[cfg(windows)]
 unsafe extern "system" fn keyboard_proc(
@@ -433,16 +395,6 @@ unsafe extern "system" fn keyboard_proc(
         return pass();
     }
 
-    // Knob rotation (volume up/down) can drive the LEDs instead of the volume.
-    if let Some(command) = knob_turn_command(cfg.knob_turn, vk) {
-        *slot = Pending::Swallow;
-        drop(pending);
-        let _ = shared
-            .commands
-            .try_send(HookCommand::RgbCommand(rgb_command_code(command)));
-        return 1;
-    }
-
     let fn_down = shared.fn_down.load(Ordering::Relaxed);
     let action = match cfg.index_by_vk.get(&vk) {
         Some(index) => {
@@ -529,28 +481,5 @@ mod tests {
         assert_eq!(cfg.index_by_vk.get(&0xAD), Some(&knob));
         assert_eq!(cfg.index_by_vk.get(&0xB3), Some(&knob));
         assert_eq!(cfg.normal[knob], HookAction::Key(0xB3));
-    }
-
-    #[test]
-    fn knob_turn_commands_follow_the_setting() {
-        assert_eq!(knob_turn_command(KnobTurn::Volume, 0xAF), None);
-        assert_eq!(knob_turn_command(KnobTurn::Volume, 0xAE), None);
-        assert_eq!(
-            knob_turn_command(KnobTurn::Brightness, 0xAF),
-            Some(RgbCommand::BrightnessUp)
-        );
-        assert_eq!(
-            knob_turn_command(KnobTurn::Brightness, 0xAE),
-            Some(RgbCommand::BrightnessDown)
-        );
-        assert_eq!(
-            knob_turn_command(KnobTurn::Speed, 0xAF),
-            Some(RgbCommand::SpeedUp)
-        );
-        assert_eq!(
-            knob_turn_command(KnobTurn::Effects, 0xAE),
-            Some(RgbCommand::PrevEffect)
-        );
-        assert_eq!(knob_turn_command(KnobTurn::Effects, 0x41), None);
     }
 }

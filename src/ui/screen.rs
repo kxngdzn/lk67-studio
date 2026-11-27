@@ -196,7 +196,6 @@ pub fn draw(app: &mut App, ui: &mut egui::Ui) {
                 widgets::status_text(ui, err, false);
             }
         });
-
     });
 
     ui.add_space(8.0);

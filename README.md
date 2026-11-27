@@ -29,7 +29,8 @@ Settings save automatically to `%APPDATA%\LK67 Studio\config.json` (debounced, a
   actions, FN or Disabled, on both the normal and FN layers. Software remapping runs through
   `WH_KEYBOARD_LL` + `SendInput`, so it works in any Windows app without flashing firmware.
 - **Knob** — the press is a normal remappable key (Play/Pause by default); rotation can send volume
-  keys or control LED brightness, animation speed or effect cycling.
+  to Windows or drive LED brightness, animation speed and effect cycling. Its detents are HID
+  consumer-control reports, which the app reads directly; LED modes cancel the OS volume step.
 - **Macros** — record live or build steps (down, up, tap, combo, delay), set repeats or
   hold-to-repeat, bind to a key and preview playback on a cancellable thread.
 - **RGB** — 13 hardware effects with a 14-slot palette, brightness, speed and direction; custom

@@ -2,6 +2,7 @@
 
 use std::f32::consts::TAU;
 
+use crate::driver::lk67::{direction_option, hardware_rgb, uses_direction, wire_mode};
 use crate::model::layout::{Layout, ROWS};
 use crate::model::lighting::{
     AnimPreset, Direction, Lighting, LightingMode, MusicVisual, PALETTE_SLOTS,
@@ -66,25 +67,18 @@ impl KeyActivity {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-struct Burst {
-    x: f32,
-    y: f32,
-    hue: f32,
-    age: f32,
-    life: f32,
-}
-
 pub struct RgbEngine {
     pub colors: Vec<[u8; 3]>,
     time: f32,
     beat: f32,
     sparks: Vec<f32>,
     spark_hue: Vec<f32>,
-    bursts: Vec<Burst>,
-    burst_timer: f32,
     anim_time: f32,
     anim_accum: f32,
+    /// Real-time frames since the hardware preview started (yc500 ticks at 5 ms).
+    hardware_frame: f64,
+    /// Wire mode + app effect the frame counter belongs to, so a new effect restarts at phase 0.
+    hardware_key: Option<(u8, usize)>,
     anim_colors: Vec<[u8; 3]>,
     screen_smooth: Vec<[f32; 3]>,
     music_smooth: [f32; BANDS],
@@ -93,7 +87,6 @@ pub struct RgbEngine {
 }
 
 pub struct LiveInputs<'a> {
-    pub activity: &'a KeyActivity,
     pub audio: &'a AudioSnapshot,
     pub screen: &'a ScreenSnapshot,
 }
@@ -112,10 +105,10 @@ impl RgbEngine {
             beat: 0.0,
             sparks: Vec::new(),
             spark_hue: Vec::new(),
-            bursts: Vec::new(),
-            burst_timer: 0.0,
             anim_time: 0.0,
             anim_accum: 0.0,
+            hardware_frame: 0.0,
+            hardware_key: None,
             anim_colors: Vec::new(),
             screen_smooth: Vec::new(),
             music_smooth: [0.0; BANDS],
@@ -160,6 +153,9 @@ impl RgbEngine {
         }
 
         self.decay_sparks(dt);
+        if !matches!(lighting.mode, LightingMode::Hardware) {
+            self.hardware_key = None;
+        }
         match lighting.mode {
             LightingMode::Hardware => self.hardware(lighting, layout, dt, live),
             LightingMode::Custom => self.custom(lighting, layout, dt),
@@ -167,7 +163,11 @@ impl RgbEngine {
             LightingMode::Screen => self.screen(lighting, layout, dt, live),
         }
 
-        let master = lighting.brightness_f32();
+        let master = if matches!(lighting.mode, LightingMode::Hardware) {
+            ((lighting.brightness.min(100) as u16 * 4) / 100) as f32 / 4.0
+        } else {
+            lighting.brightness_f32()
+        };
         for color in &mut self.colors {
             *color = scale(*color, master);
         }
@@ -180,194 +180,35 @@ impl RgbEngine {
         }
     }
 
-    fn hardware(&mut self, lighting: &Lighting, layout: &Layout, dt: f32, live: &LiveInputs<'_>) {
-        let speed = 0.2 + (lighting.speed as f32 / 100.0) * 3.0;
-        let direction = lighting.direction;
-        let primary = lighting.colors[0];
-        match lighting.effect {
-            0 => {
-                self.colors.fill([0, 0, 0]);
-            }
-            1 => {
-                self.colors.fill(primary);
-            }
-            2 => {
-                let wave = (self.time * speed * 0.7).sin() * 0.5 + 0.5;
-                let value = 0.08 + 0.92 * wave.powf(1.6);
-                self.colors.fill(scale(primary, value));
-            }
-            3 => {
-                for (i, key) in layout.keys.iter().enumerate() {
-                    let nx = center_x(key, layout);
-                    let ny = center_y(key);
-                    let phase = dir_phase(direction, nx, ny);
-                    let hue = (phase + self.time * speed * 0.12).rem_euclid(1.0);
-                    let wave = 0.55 + 0.45 * ((phase * 6.0 - self.time * speed).sin() * 0.5 + 0.5);
-                    self.colors[i] = scale(hsv(hue, 1.0, 1.0), wave);
-                }
-            }
-            4 => {
-                for i in 0..layout.len() {
-                    let hue = (self.time * speed * 0.08 + i as f32 * 0.012).rem_euclid(1.0);
-                    self.colors[i] = hsv(hue, 1.0, 1.0);
-                }
-            }
-            5 => {
-                for (i, key) in layout.keys.iter().enumerate() {
-                    let nx = center_x(key, layout);
-                    let phase = dir_phase(direction, nx, center_y(key));
-                    let pos = (phase * PALETTE_SLOTS as f32 + self.time * speed * 2.2)
-                        .rem_euclid(PALETTE_SLOTS as f32);
-                    let a = pos.floor() as usize % PALETTE_SLOTS;
-                    let b = (a + 1) % PALETTE_SLOTS;
-                    let t = pos.fract();
-                    let color = mix(lighting.colors[a], lighting.colors[b], t);
-                    let wave =
-                        0.45 + 0.55 * ((phase * 4.0 - self.time * speed * 1.5).sin() * 0.5 + 0.5);
-                    self.colors[i] = scale(color, wave);
-                }
-            }
-            6 => {
-                let len = layout.len() as f32;
-                let pos = (self.time * speed * 0.35).rem_euclid(1.0) * len;
-                for i in 0..layout.len() {
-                    let index = match direction {
-                        Direction::Left | Direction::Up | Direction::CounterClockwise => {
-                            (layout.len() - 1 - i) as f32
-                        }
-                        _ => i as f32,
-                    };
-                    let tail = 10.0;
-                    let mut d = (pos - index).rem_euclid(len);
-                    if d > len - tail {
-                        d = len - d;
-                    }
-                    let value = if d < tail {
-                        (1.0 - d / tail).powf(1.8)
-                    } else {
-                        0.0
-                    };
-                    self.colors[i] = scale(primary, value.max(0.03));
-                }
-            }
-            7 => {
-                for i in 0..layout.len() {
-                    self.colors[i] = [0, 0, 0];
-                }
-                for (source, pulse) in live.activity.pulse.iter().enumerate() {
-                    if *pulse <= 0.0 {
-                        continue;
-                    }
-                    let src = &layout.keys[source.min(layout.len() - 1)];
-                    let radius = (1.0 - *pulse) * 4.2;
-                    for (i, target) in layout.keys.iter().enumerate() {
-                        let dx = target.x - src.x;
-                        let dy = (target.y - src.y) * 1.4;
-                        let distance = (dx * dx + dy * dy).sqrt();
-                        let ring = (1.0 - (distance - radius).abs() / 0.9).max(0.0);
-                        let color = mix(primary, lighting.colors[7], (radius * 0.3).min(1.0));
-                        let add = scale(color, ring * pulse.powf(0.6));
-                        self.colors[i] = add_sat(self.colors[i], add);
-                    }
-                }
-            }
-            8 => {
-                self.colors.fill(scale(primary, 0.05));
-                let ignite = dt * (1.0 + speed * 1.4);
-                for i in 0..layout.len() {
-                    if self.sparks[i] <= 0.0 && self.rand() < ignite * 0.02 {
-                        self.sparks[i] = 1.0;
-                        self.spark_hue[i] = self.rand();
-                    }
-                }
-                for i in 0..layout.len() {
-                    if self.sparks[i] > 0.0 {
-                        let color = hsv(self.spark_hue[i], 0.9, 1.0);
-                        self.colors[i] = add_sat(self.colors[i], scale(color, self.sparks[i]));
-                    }
-                }
-            }
-            9 => {
-                let band = (self.time * speed * 0.22).rem_euclid(1.35) - 0.2;
-                for (i, key) in layout.keys.iter().enumerate() {
-                    let phase = dir_phase(direction, center_x(key, layout), center_y(key));
-                    let distance = (phase - band).abs();
-                    let value = (1.0 - distance / 0.16).max(0.0).powf(1.4);
-                    self.colors[i] = scale(primary, value.max(0.04));
-                }
-            }
-            10 => {
-                self.colors.fill(scale(primary, 0.05));
-                let ignite = dt * (0.4 + speed * 0.5);
-                for i in 0..layout.len() {
-                    if self.sparks[i] <= 0.0 && self.rand() < ignite * 0.02 {
-                        self.sparks[i] = 1.0;
-                        self.spark_hue[i] =
-                            (i as f32 / layout.len() as f32 + self.time * 0.02).rem_euclid(1.0);
-                    }
-                }
-                for i in 0..layout.len() {
-                    if self.sparks[i] > 0.0 {
-                        let color = mix(primary, hsv(self.spark_hue[i], 0.8, 1.0), 0.5);
-                        self.colors[i] =
-                            add_sat(self.colors[i], scale(color, self.sparks[i].powf(1.3)));
-                    }
-                }
-            }
-            11 => {
-                for (i, key) in layout.keys.iter().enumerate() {
-                    let seed = hash01(key.col as u32 * 131 + key.row as u32 * 71);
-                    let drop = (self.time * speed * 0.5 + seed * 5.0).rem_euclid(ROWS as f32 + 1.5);
-                    let distance = (key.y - drop + 0.5).abs();
-                    let value = if distance < 2.4 {
-                        (1.0 - distance / 2.4).powf(2.2)
-                    } else {
-                        0.0
-                    };
-                    self.colors[i] = scale(primary, value.max(0.02));
-                }
-            }
-            12 => {
-                self.colors.fill([0, 0, 0]);
-                self.burst_timer -= dt;
-                if self.burst_timer <= 0.0 {
-                    self.burst_timer = 0.55 + self.rand() * 0.9;
-                    let hue = self.rand();
-                    let count = 2 + (self.rand() * 3.0) as usize;
-                    for _ in 0..count {
-                        let x = 0.1 + self.rand() * 0.8;
-                        let y = 0.1 + self.rand() * 0.8;
-                        let hue = (hue + self.rand() * 0.12).rem_euclid(1.0);
-                        let life = 0.9 + self.rand() * 0.7;
-                        self.bursts.push(Burst {
-                            x,
-                            y,
-                            hue,
-                            age: 0.0,
-                            life,
-                        });
-                    }
-                }
-                for burst in &mut self.bursts {
-                    burst.age += dt;
-                }
-                self.bursts.retain(|b| b.age < b.life);
-                for burst in &self.bursts {
-                    let radius = burst.age * 1.6;
-                    let fade = (1.0 - burst.age / burst.life).max(0.0);
-                    for (i, key) in layout.keys.iter().enumerate() {
-                        let nx = center_x(key, layout);
-                        let ny = center_y(key);
-                        let dx = (nx - burst.x) * 7.0;
-                        let dy = (ny - burst.y) * 3.2;
-                        let distance = (dx * dx + dy * dy).sqrt();
-                        let ring = (1.0 - (distance - radius).abs() / 0.75).max(0.0);
-                        let color = hsv(burst.hue, 0.85, 1.0);
-                        self.colors[i] = add_sat(self.colors[i], scale(color, ring * fade * 0.9));
-                    }
-                }
-            }
-            _ => self.colors.fill(primary),
+    fn hardware(&mut self, lighting: &Lighting, layout: &Layout, dt: f32, _live: &LiveInputs<'_>) {
+        // The yc500 firmware steps its effects on a 5 ms tick. Drive the
+        // preview from the same counter so phase and speed line up.
+        let mode = wire_mode(lighting);
+        let key = (mode, lighting.effect);
+        if self.hardware_key != Some(key) {
+            self.hardware_frame = 0.0;
+            self.hardware_key = Some(key);
+        }
+        self.hardware_frame += dt as f64 / 0.005;
+        let rainbow = matches!(lighting.effect, 3 | 4);
+        let option = if uses_direction(lighting.effect) {
+            direction_option(lighting.direction)
+        } else {
+            0
+        };
+        let rgb = hardware_rgb(lighting);
+        let speed = ((lighting.speed.min(100) as u16 * 4) / 100) as u8;
+        for (i, key) in layout.keys.iter().enumerate() {
+            self.colors[i] = yc500_color(
+                mode,
+                rainbow,
+                rgb,
+                option,
+                speed,
+                key.matrix as usize,
+                i,
+                self.hardware_frame,
+            );
         }
     }
 
@@ -543,6 +384,512 @@ impl RgbEngine {
     }
 }
 
+/// LED grid used by the yc500 effect engine on the LK67: 6 rows x 15 columns.
+const YC500_ROWS: usize = 6;
+const YC500_COLS: usize = 15;
+const HUE_CYCLE: f64 = 6.0 * 255.0;
+
+/// The firmware's seven-colour preset palette.
+const PRESETS: [[u8; 3]; 7] = [
+    [255, 0, 0],
+    [255, 128, 0],
+    [255, 255, 0],
+    [0, 255, 0],
+    [0, 255, 255],
+    [0, 0, 255],
+    [255, 0, 255],
+];
+
+/// yc500 speed tables, indexed by the wire byte (1..=5).
+const BREATH: [u16; 6] = [10, 40, 60, 80, 100, 200];
+const BREATH_HOLD: u16 = 20;
+const SPECTRUM: [u16; 6] = [5, 4, 3, 2, 1, 0];
+const HUE: [u16; 6] = [5, 4, 3, 2, 1, 0];
+const RIPPLE: [u16; 6] = [5, 7, 9, 11, 13, 12];
+const RADIANT: [u16; 6] = [5, 7, 9, 11, 13, 12];
+const STARS: [u16; 6] = [5, 10, 15, 20, 25, 12];
+const FLOW: [u16; 6] = [5, 10, 15, 20, 25, 12];
+const LAYERS_SPEED: [u16; 6] = [2, 3, 5, 7, 9, 11];
+const SINE: [u16; 6] = [5, 7, 10, 14, 17, 20];
+
+const LAYERS_COUNTS: &[u16] = &[
+    4, 4, 6, 6, 5, 5, 5, 6, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 255, 13, 11, 11, 10, 8, 11,
+    12, 8, 10, 0,
+];
+const LAYERS_CELLS: &[(u8, u8)] = &[
+    (0, 0),
+    (1, 0),
+    (5, 17),
+    (5, 16),
+    (2, 0),
+    (1, 1),
+    (4, 16),
+    (3, 16),
+    (0, 2),
+    (1, 2),
+    (2, 1),
+    (5, 15),
+    (4, 15),
+    (3, 15),
+    (0, 3),
+    (1, 3),
+    (2, 2),
+    (5, 14),
+    (4, 14),
+    (3, 14),
+    (0, 4),
+    (1, 4),
+    (2, 3),
+    (5, 13),
+    (4, 13),
+    (0, 5),
+    (1, 5),
+    (2, 4),
+    (5, 12),
+    (3, 13),
+    (0, 6),
+    (1, 6),
+    (2, 5),
+    (5, 11),
+    (4, 12),
+    (0, 7),
+    (1, 7),
+    (2, 6),
+    (5, 10),
+    (4, 11),
+    (3, 11),
+    (1, 10),
+    (2, 10),
+    (3, 10),
+    (4, 10),
+    (4, 9),
+    (4, 8),
+    (3, 7),
+    (2, 7),
+    (1, 8),
+    (1, 9),
+    (2, 9),
+    (3, 9),
+    (3, 8),
+    (2, 8),
+    (1, 10),
+    (2, 10),
+    (3, 10),
+    (4, 10),
+    (4, 9),
+    (4, 8),
+    (3, 7),
+    (2, 7),
+    (1, 8),
+    (1, 9),
+    (2, 9),
+    (3, 9),
+    (3, 8),
+    (2, 8),
+    (255, 255),
+    (1, 10),
+    (2, 10),
+    (3, 10),
+    (4, 10),
+    (4, 9),
+    (4, 8),
+    (3, 7),
+    (2, 7),
+    (1, 8),
+    (1, 9),
+    (0, 8),
+    (0, 9),
+    (5, 9),
+    (0, 10),
+    (1, 11),
+    (2, 11),
+    (3, 11),
+    (4, 11),
+    (5, 10),
+    (0, 7),
+    (1, 7),
+    (2, 6),
+    (3, 6),
+    (4, 7),
+    (0, 11),
+    (1, 12),
+    (2, 12),
+    (4, 12),
+    (5, 11),
+    (0, 6),
+    (1, 6),
+    (2, 5),
+    (3, 5),
+    (4, 6),
+    (5, 6),
+    (0, 12),
+    (1, 13),
+    (2, 13),
+    (3, 13),
+    (5, 12),
+    (0, 5),
+    (1, 5),
+    (2, 4),
+    (3, 4),
+    (4, 5),
+    (0, 13),
+    (4, 13),
+    (5, 13),
+    (0, 4),
+    (1, 4),
+    (2, 3),
+    (3, 3),
+    (4, 4),
+    (0, 14),
+    (1, 14),
+    (2, 14),
+    (3, 14),
+    (4, 14),
+    (5, 14),
+    (0, 3),
+    (1, 3),
+    (2, 2),
+    (3, 2),
+    (4, 3),
+    (0, 15),
+    (1, 15),
+    (2, 15),
+    (3, 15),
+    (4, 15),
+    (5, 15),
+    (0, 2),
+    (1, 2),
+    (2, 1),
+    (3, 1),
+    (4, 2),
+    (5, 3),
+    (0, 16),
+    (1, 16),
+    (2, 16),
+    (3, 16),
+    (4, 16),
+    (5, 16),
+    (1, 1),
+    (5, 2),
+    (0, 17),
+    (1, 17),
+    (3, 17),
+    (5, 17),
+    (0, 0),
+    (1, 0),
+    (2, 0),
+    (3, 0),
+    (4, 0),
+    (5, 0),
+];
+const LAYERS_PAUSE: u64 = 5;
+const LAYERS_REST: u64 = 25;
+const LAYERS_SCRIPT_COLS: usize = 18;
+
+fn yc500_step_frames(mode: u8, wire: u8) -> f64 {
+    let i = wire.min(5) as usize;
+    match mode {
+        5 => RIPPLE[i] as f64,
+        14 => RADIANT[i] as f64,
+        6 => STARS[i] as f64,
+        7 => FLOW[i] as f64,
+        9 => LAYERS_SPEED[i] as f64,
+        10 => SINE[i] as f64,
+        _ => 8.0,
+    }
+}
+
+fn yc500_hue_turns(mode: u8, wire: u8, frame: f64) -> f64 {
+    let i = wire.min(5) as usize;
+    if mode == 3 {
+        (frame / 2.0).floor() * SPECTRUM[i] as f64 / HUE_CYCLE
+    } else {
+        frame * (HUE[i] as f64 + 1.0) / HUE_CYCLE
+    }
+}
+
+fn yc500_breath(wire: u8, frame: f64) -> (f32, i64) {
+    let ramp = BREATH[wire.min(5) as usize] as f64;
+    let total = 2.0 * (ramp + BREATH_HOLD as f64);
+    let cycle = (frame / total).floor() as i64;
+    let f = frame.rem_euclid(total);
+    let level = if f < ramp {
+        f / ramp
+    } else if f < ramp + BREATH_HOLD as f64 {
+        1.0
+    } else if f < 2.0 * ramp + BREATH_HOLD as f64 {
+        1.0 - (f - ramp - BREATH_HOLD as f64) / ramp
+    } else {
+        0.0
+    };
+    (level as f32, cycle)
+}
+
+fn yc500_base(rainbow: bool, rgb: [u8; 3], step: i64) -> [u8; 3] {
+    if rainbow {
+        PRESETS[step.rem_euclid(7) as usize]
+    } else {
+        rgb
+    }
+}
+
+fn glow(level: f32) -> f32 {
+    level.clamp(0.0, 1.0).powf(0.6)
+}
+
+fn noise(i: i64, n: i64) -> f32 {
+    let mut h = (i
+        .wrapping_mul(374_761_393)
+        .wrapping_add(n.wrapping_mul(668_265_263))) as i32;
+    h = (h ^ ((h as u32) >> 13) as i32).wrapping_mul(1_274_126_177);
+    ((h ^ ((h as u32) >> 16) as i32) as u32) as f32 / 4_294_967_296.0
+}
+
+fn yc500_layers_total() -> u64 {
+    let mut step = 0u64;
+    for &n in LAYERS_COUNTS {
+        if n == 0 {
+            break;
+        }
+        if n == 255 {
+            step += LAYERS_PAUSE;
+        } else {
+            step += 1;
+        }
+    }
+    step
+}
+
+fn yc500_layers_lit(row: usize, col: usize, now: u64) -> Option<usize> {
+    let mut step = 0u64;
+    let mut phase = 0usize;
+    let mut at = 0usize;
+    let mut lit = None;
+    for &n in LAYERS_COUNTS {
+        if n == 0 {
+            break;
+        }
+        if n == 255 {
+            step += LAYERS_PAUSE;
+            phase += 1;
+            at += 1;
+            continue;
+        }
+        for _ in 0..n {
+            if let Some(&(r, c)) = LAYERS_CELLS.get(at) {
+                if r as usize == row && c as usize == col && step <= now {
+                    lit = Some(phase);
+                }
+            }
+            at += 1;
+        }
+        step += 1;
+    }
+    lit
+}
+
+#[allow(clippy::too_many_arguments)]
+fn yc500_color(
+    mode: u8,
+    rainbow: bool,
+    rgb: [u8; 3],
+    option: u8,
+    speed_level: u8,
+    slot: usize,
+    index: usize,
+    frame: f64,
+) -> [u8; 3] {
+    let wire = 5u8.saturating_sub(speed_level).clamp(1, 5);
+    let step_frames = yc500_step_frames(mode, wire);
+    let step = (frame / step_frames).floor();
+    let step_phase = (frame.rem_euclid(step_frames)) / step_frames;
+    let turns = yc500_hue_turns(mode, wire, frame);
+    let row = slot % YC500_ROWS;
+    let col = (slot / YC500_ROWS).min(YC500_COLS - 1);
+    let x = col as f32 / (YC500_COLS - 1) as f32;
+    let y = row as f32 / (YC500_ROWS - 1) as f32;
+
+    match mode {
+        1 | 19 => {
+            if rainbow {
+                hsv(x, 1.0, 1.0)
+            } else {
+                rgb
+            }
+        }
+        2 => {
+            let (level, cycle) = yc500_breath(wire, frame);
+            scale(yc500_base(rainbow, rgb, cycle), glow(level))
+        }
+        3 => hsv(turns as f32, 1.0, 1.0),
+        4 => {
+            let along = wave_along(option, x, y);
+            if rainbow {
+                hsv(along + turns as f32, 1.0, 1.0)
+            } else {
+                let wave =
+                    0.5 + 0.5 * (((along as f64 + turns) * std::f64::consts::TAU).cos() as f32);
+                scale(rgb, glow(wave))
+            }
+        }
+        5 => {
+            let life = 24.0;
+            let burst = (step / life).floor();
+            let ox = noise(1, burst as i64);
+            let oy = noise(2, burst as i64);
+            let dx = (x - ox) * YC500_COLS as f32;
+            let dy = (y - oy) * YC500_ROWS as f32;
+            let d = (dx * dx + dy * dy).sqrt();
+            let radius = (step % life) as f32 + step_phase as f32;
+            scale(
+                yc500_base(rainbow, rgb, burst as i64),
+                glow((1.0 - (d - radius).abs() * 0.8).max(0.0)),
+            )
+        }
+        6 => {
+            let life: f64 = 40.0;
+            let born = step - ((noise(index as i64, 0) as f64 * life).floor() % life);
+            let age = ((step - born) % life + life) % life;
+            let level = if age < 6.0 {
+                age / 6.0
+            } else {
+                (1.0 - (age - 6.0) / (life - 6.0)).max(0.0)
+            };
+            let tone = if rainbow {
+                hsv(noise(index as i64, (step / life).floor() as i64), 1.0, 1.0)
+            } else {
+                rgb
+            };
+            scale(tone, glow(level as f32))
+        }
+        7 => {
+            let cells = YC500_ROWS * YC500_COLS;
+            let pos = if option == 1 {
+                let ring = row
+                    .min(YC500_ROWS - 1 - row)
+                    .min(col)
+                    .min(YC500_COLS - 1 - col);
+                ring * 40
+                    + if row <= YC500_ROWS / 2 {
+                        col
+                    } else {
+                        YC500_COLS * 2 - col
+                    }
+            } else {
+                row * YC500_COLS
+                    + if row % 2 == 1 {
+                        YC500_COLS - 1 - col
+                    } else {
+                        col
+                    }
+            };
+            let head = step % cells as f64 + step_phase;
+            let dist = ((pos as f64 - head) % cells as f64 + cells as f64) % cells as f64;
+            let tail = 6.0;
+            let level = if dist > cells as f64 - tail {
+                (dist - (cells as f64 - tail)) / tail
+            } else {
+                0.0
+            };
+            scale(
+                yc500_base(rainbow, rgb, (step / cells as f64).floor() as i64),
+                glow(level as f32),
+            )
+        }
+        8 => {
+            let hit = (noise(3, step as i64) * 100.0).floor();
+            if (index % 100) as f32 == hit {
+                scale(
+                    yc500_base(rainbow, rgb, step as i64),
+                    glow(1.0 - step_phase as f32),
+                )
+            } else {
+                [0, 0, 0]
+            }
+        }
+        9 => {
+            let total = yc500_layers_total() + LAYERS_REST;
+            let cycle = (step as u64) / total;
+            let now = (step as u64) % total;
+            let script_col = ((col * LAYERS_SCRIPT_COLS) / YC500_COLS).min(LAYERS_SCRIPT_COLS - 1);
+            match yc500_layers_lit(row, script_col, now) {
+                Some(phase) => {
+                    if rainbow {
+                        PRESETS[((cycle * 2 + phase as u64) % 6) as usize]
+                    } else {
+                        rgb
+                    }
+                }
+                None => [0, 0, 0],
+            }
+        }
+        10 => {
+            let center = (YC500_COLS / 2) as i32;
+            let mut level = 0.0;
+            for age in 0..20 {
+                let born = step - age as f64;
+                if born < 0.0 {
+                    break;
+                }
+                let r = (2.5 + 2.5 * ((born / 30.0) * std::f64::consts::TAU).sin()).round() as i32;
+                if r != row as i32 {
+                    continue;
+                }
+                if col as i32 == center - age as i32 || col as i32 == center + age as i32 {
+                    level = 1.0;
+                }
+            }
+            scale(
+                yc500_base(rainbow, rgb, (step / 30.0).floor() as i64),
+                glow(level),
+            )
+        }
+        14 => {
+            let a = ((y - 0.5) * 0.4).atan2(x - 0.5) / std::f32::consts::TAU;
+            hsv(a + ((step + step_phase) / 24.0) as f32, 1.0, 1.0)
+        }
+        17 => {
+            let drop = frame / (12.0 * YC500_ROWS as f64) + noise(col as i64, 0) as f64;
+            let fall = drop.rem_euclid(1.0);
+            let d = (y as f64 - fall).abs();
+            let flake = if rainbow {
+                PRESETS[((noise(col as i64, drop.floor() as i64 + 1) * 7.0).floor() as usize) % 7]
+            } else {
+                rgb
+            };
+            let visible = if noise(col as i64, 1) > 0.4 { 1.0 } else { 0.3 };
+            scale(flake, glow(((1.0 - d * 5.0).max(0.0) * visible) as f32))
+        }
+        18 => {
+            let drop = frame / (8.0 * YC500_ROWS as f64) + noise(col as i64, 0) as f64;
+            let head = drop.rem_euclid(1.5);
+            let d = head - y as f64;
+            let active = noise(col as i64, (drop / 1.5).floor() as i64) > 0.6;
+            let level = if active && d >= 0.0 && d < 0.5 {
+                1.0 - d * 2.0
+            } else {
+                0.0
+            };
+            scale(yc500_base(rainbow, rgb, col as i64), glow(level as f32))
+        }
+        _ => rgb,
+    }
+}
+
+/// Position along the travelling wave for yc500 mode 4.
+///
+/// The hue is `along + time`, so a feature moves toward larger `along`. The
+/// firmware counts its columns from the left and option 0 is "left to right",
+/// which means `along` has to fall as `x` grows for that option.
+fn wave_along(option: u8, x: f32, y: f32) -> f32 {
+    match option % 4 {
+        0 => 1.0 - x,
+        1 => x,
+        2 => y,
+        _ => 1.0 - y,
+    }
+}
+
 fn center_x(key: &crate::model::layout::KeyDef, layout: &Layout) -> f32 {
     ((key.x + key.w * 0.5) / layout.width).clamp(0.0, 1.0)
 }
@@ -560,14 +907,6 @@ pub fn dir_phase(direction: Direction, nx: f32, ny: f32) -> f32 {
         Direction::Clockwise => (ny - 0.5).atan2(nx - 0.5) / TAU + 0.5,
         Direction::CounterClockwise => (-(ny - 0.5)).atan2(nx - 0.5) / TAU + 0.5,
     }
-}
-
-fn hash01(value: u32) -> f32 {
-    let mut x = value.wrapping_mul(0x9E37_79B9) ^ 0x85EB_CA6B;
-    x ^= x >> 15;
-    x = x.wrapping_mul(0x2545_F491);
-    x ^= x >> 13;
-    (x & 0xFFFF) as f32 / 65535.0
 }
 
 pub fn hsv(h: f32, s: f32, v: f32) -> [u8; 3] {
@@ -640,14 +979,9 @@ mod tests {
         lighting.effect = effect;
         lighting.brightness = 100;
         let mut engine = RgbEngine::new();
-        let mut activity = KeyActivity::new(layout.len());
-        if effect >= 7 {
-            activity.press(20);
-        }
         let audio = AudioSnapshot::default();
         let screen = ScreenSnapshot::default();
         let live = LiveInputs {
-            activity: &activity,
             audio: &audio,
             screen: &screen,
         };
@@ -673,6 +1007,38 @@ mod tests {
         }
     }
 
+    fn wave_peak_column(option: u8, frame: f64) -> usize {
+        let mut best = (0usize, -1.0f32);
+        for col in 0..15usize {
+            let slot = col * 6 + 1;
+            let color = yc500_color(4, false, [255, 255, 255], option, 2, slot, 0, frame);
+            let level = color[0] as f32 + color[1] as f32 + color[2] as f32;
+            if level > best.1 {
+                best = (col, level);
+            }
+        }
+        best.0
+    }
+
+    #[test]
+    fn wave_travels_left_to_right_for_option_zero() {
+        // Speed level 2 is the default 50: three hue steps per 5 ms frame, so
+        // frames 102 and 153 place the crest at x = 0.2 and x = 0.3.
+        assert!(wave_peak_column(0, 153.0) > wave_peak_column(0, 102.0));
+        assert!(wave_peak_column(1, 153.0) < wave_peak_column(1, 102.0));
+    }
+
+    #[test]
+    fn wave_direction_matches_its_label() {
+        // Option 0 is "left to right": along must decrease with x so the
+        // advancing hue carries the wave rightwards. Option 1 reverses it.
+        assert!(wave_along(0, 0.9, 0.5) < wave_along(0, 0.1, 0.5));
+        assert!(wave_along(1, 0.9, 0.5) > wave_along(1, 0.1, 0.5));
+        // Verticals keep their previous mapping.
+        assert!(wave_along(2, 0.5, 0.9) > wave_along(2, 0.5, 0.1));
+        assert!(wave_along(3, 0.5, 0.9) < wave_along(3, 0.5, 0.1));
+    }
+
     #[test]
     fn music_and_screen_modes_are_safe_without_input() {
         let layout = layout();
@@ -684,11 +1050,9 @@ mod tests {
             let mut lighting = Lighting::default();
             lighting.mode = mode;
             let mut engine = RgbEngine::new();
-            let activity = KeyActivity::new(layout.len());
             let audio = AudioSnapshot::default();
             let screen = ScreenSnapshot::default();
             let live = LiveInputs {
-                activity: &activity,
                 audio: &audio,
                 screen: &screen,
             };

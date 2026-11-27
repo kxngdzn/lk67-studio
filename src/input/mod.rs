@@ -7,8 +7,10 @@
 
 pub mod hook;
 pub mod inject;
+pub mod knob;
 pub mod macro_player;
 pub mod recorder;
 
 pub use hook::{HookCommand, HookConfig, HookHandle, RawKeyEvent, start_hook};
+pub use knob::{KnobEvent, KnobWatcher};
 pub use macro_player::{MacroPlayer, PlayerStatus};
