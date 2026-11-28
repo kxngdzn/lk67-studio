@@ -53,20 +53,6 @@ pub enum ReportTransport {
     OutputReport,
 }
 
-impl ReportTransport {
-    pub const ALL: [ReportTransport; 2] = [
-        ReportTransport::FeatureReport,
-        ReportTransport::OutputReport,
-    ];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            ReportTransport::FeatureReport => "Feature report (HID SetFeature)",
-            ReportTransport::OutputReport => "Output report (WriteFile)",
-        }
-    }
-}
-
 /// Vendor command opcodes for the yc500 family.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Opcodes {
@@ -246,12 +232,13 @@ pub(crate) fn direction_option(direction: Direction) -> u8 {
 /// Map the app's effect list to yc500 wire modes.
 ///
 /// The LK67 firmware exposes the 1..19 family. Effects that have no direct
-/// equivalent reuse the closest firmware animation. Music and screen modes
+/// equivalent reuse the closest firmware animation. Custom layouts and picture
+/// effects share the flash-backed user-picture mode 13; music and screen modes
 /// are rendered by the firmware from a host stream, so they pick modes 20/22
-/// and 21 instead of the flash-backed user-picture mode 13.
+/// and 21 instead.
 pub(crate) fn wire_mode(lighting: &Lighting) -> u8 {
     match lighting.mode {
-        LightingMode::Custom => return 13, // USERPIC per-key picture
+        LightingMode::Custom | LightingMode::Picture => return 13, // USERPIC per-key picture
         LightingMode::Music => {
             // 20 "Classic", 22 "EDM"; both draw host-fed bars.
             return match lighting.music.visual {
@@ -329,6 +316,7 @@ pub fn build_effect_report(cfg: &DriverConfig, lighting: &Lighting) -> Vec<u8> {
     // back to its stock preset (red/pink) and ignores the chosen colour.
     let flags = match lighting.mode {
         LightingMode::Music | LightingMode::Screen => 0,
+        LightingMode::Picture => 7,
         _ if matches!(lighting.effect, 3 | 4) => 8,
         _ => 7,
     };
@@ -587,7 +575,7 @@ pub fn matrix_colors(colors: &[[u8; 3]]) -> Vec<[u8; 3]> {
     out
 }
 
-/// Compact hex dump for the packet inspector.
+/// Compact hex dump for diagnostic output.
 pub fn hex_dump(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 3);
     for (i, byte) in bytes.iter().enumerate() {
@@ -638,6 +626,12 @@ mod tests {
 
         lighting.mode = LightingMode::Custom;
         assert_eq!(build_effect_report(&cfg, &lighting)[2], 13);
+
+        lighting.mode = LightingMode::Picture;
+        lighting.effect = 3;
+        let picture = build_effect_report(&cfg, &lighting);
+        assert_eq!(picture[2], 13);
+        assert_eq!(picture[5] & 0x0F, 7);
 
         lighting.mode = LightingMode::Screen;
         assert_eq!(build_effect_report(&cfg, &lighting)[2], 21);

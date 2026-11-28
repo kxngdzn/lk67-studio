@@ -1,9 +1,9 @@
-//! Music reactive page: capture source, FFT meter and response shaping.
+//! Music reactive page: capture source and FFT meter.
 
 use egui::RichText;
 
 use crate::app::App;
-use crate::model::lighting::{AudioSource, LightingMode, MusicVisual};
+use crate::model::lighting::{AudioSource, LightingMode};
 use crate::ui::{theme, widgets};
 
 pub fn draw(app: &mut App, ui: &mut egui::Ui) {
@@ -149,94 +149,6 @@ pub fn draw(app: &mut App, ui: &mut egui::Ui) {
                     );
                 });
         });
-    });
-
-    ui.add_space(8.0);
-    theme::card(ui, "Response", |ui| {
-        let music = &mut app.cfg.profiles[index].lighting.music;
-        ui.horizontal(|ui| {
-            ui.label("Visual");
-            egui::ComboBox::from_id_salt("music-visual")
-                .selected_text(music.visual.label())
-                .width(150.0)
-                .show_ui(ui, |ui| {
-                    for visual in MusicVisual::ALL {
-                        if ui
-                            .selectable_value(&mut music.visual, visual, visual.label())
-                            .clicked()
-                        {
-                            app.ui.dirty = true;
-                            ui.close();
-                        }
-                    }
-                });
-            ui.checkbox(&mut music.show_meter, "Show meter");
-        });
-        ui.add_space(2.0);
-        let mut sensitivity = music.sensitivity;
-        if ui
-            .add(
-                egui::Slider::new(&mut sensitivity, 0.2..=4.0)
-                    .text("Sensitivity")
-                    .step_by(0.05),
-            )
-            .changed()
-        {
-            music.sensitivity = sensitivity;
-            app.ui.dirty = true;
-        }
-        let mut gain = music.gain;
-        if ui
-            .add(
-                egui::Slider::new(&mut gain, 0.2..=3.0)
-                    .text("Gain")
-                    .step_by(0.05),
-            )
-            .changed()
-        {
-            music.gain = gain;
-            app.ui.dirty = true;
-        }
-        let mut smoothing = music.smoothing;
-        if ui
-            .add(
-                egui::Slider::new(&mut smoothing, 0.0..=0.95)
-                    .text("Smoothing")
-                    .step_by(0.01),
-            )
-            .changed()
-        {
-            music.smoothing = smoothing;
-            app.ui.dirty = true;
-        }
-        let mut color_speed = music.color_speed;
-        if ui
-            .add(
-                egui::Slider::new(&mut color_speed, 0.0..=2.0)
-                    .text("Colour drift")
-                    .step_by(0.05),
-            )
-            .changed()
-        {
-            music.color_speed = color_speed;
-            app.ui.dirty = true;
-        }
-        let mut beat_boost = music.beat_boost;
-        if ui
-            .add(
-                egui::Slider::new(&mut beat_boost, 0.0..=2.0)
-                    .text("Beat boost")
-                    .step_by(0.05),
-            )
-            .changed()
-        {
-            music.beat_boost = beat_boost;
-            app.ui.dirty = true;
-        }
-        theme::hint(
-            ui,
-            "Smoothing follows the signal more slowly; sensitivity scales both the bands and beat detection.",
-        );
     });
 
     if start {

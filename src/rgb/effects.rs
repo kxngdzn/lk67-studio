@@ -4,9 +4,7 @@ use std::f32::consts::TAU;
 
 use crate::driver::lk67::{direction_option, hardware_rgb, uses_direction, wire_mode};
 use crate::model::layout::{Layout, ROWS};
-use crate::model::lighting::{
-    AnimPreset, Direction, Lighting, LightingMode, MusicVisual, PALETTE_SLOTS,
-};
+use crate::model::lighting::{Direction, Lighting, LightingMode, MusicVisual, PALETTE_SLOTS};
 use crate::rgb::music::{AudioSnapshot, BANDS};
 use crate::rgb::screen::ScreenSnapshot;
 
@@ -73,13 +71,10 @@ pub struct RgbEngine {
     beat: f32,
     sparks: Vec<f32>,
     spark_hue: Vec<f32>,
-    anim_time: f32,
-    anim_accum: f32,
     /// Real-time frames since the hardware preview started (yc500 ticks at 5 ms).
     hardware_frame: f64,
     /// Wire mode + app effect the frame counter belongs to, so a new effect restarts at phase 0.
     hardware_key: Option<(u8, usize)>,
-    anim_colors: Vec<[u8; 3]>,
     screen_smooth: Vec<[f32; 3]>,
     music_smooth: [f32; BANDS],
     music_level: f32,
@@ -105,11 +100,8 @@ impl RgbEngine {
             beat: 0.0,
             sparks: Vec::new(),
             spark_hue: Vec::new(),
-            anim_time: 0.0,
-            anim_accum: 0.0,
             hardware_frame: 0.0,
             hardware_key: None,
-            anim_colors: Vec::new(),
             screen_smooth: Vec::new(),
             music_smooth: [0.0; BANDS],
             music_level: 0.0,
@@ -121,7 +113,6 @@ impl RgbEngine {
         self.colors.resize(len, [0, 0, 0]);
         self.sparks.resize(len, 0.0);
         self.spark_hue.resize(len, 0.0);
-        self.anim_colors.resize(len, [0, 0, 0]);
         self.screen_smooth.resize(len, [0.0, 0.0, 0.0]);
     }
 
@@ -142,6 +133,7 @@ impl RgbEngine {
         layout: &Layout,
         dt: f32,
         live: &LiveInputs<'_>,
+        picture: Option<&[[u8; 3]]>,
     ) -> &[[u8; 3]] {
         let n = layout.len();
         self.ensure_len(n);
@@ -158,7 +150,8 @@ impl RgbEngine {
         }
         match lighting.mode {
             LightingMode::Hardware => self.hardware(lighting, layout, dt, live),
-            LightingMode::Custom => self.custom(lighting, layout, dt),
+            LightingMode::Custom => self.custom(lighting, layout),
+            LightingMode::Picture => self.picture(lighting, layout, picture),
             LightingMode::Music => self.music(lighting, layout, dt, live),
             LightingMode::Screen => self.screen(lighting, layout, dt, live),
         }
@@ -212,70 +205,25 @@ impl RgbEngine {
         }
     }
 
-    fn custom(&mut self, lighting: &Lighting, layout: &Layout, dt: f32) {
-        let anim = &lighting.animation;
-        let use_animation =
-            lighting.animation_playing && !anim.keyframes.is_empty() && anim.duration_ms() > 0;
-        if !use_animation {
-            for i in 0..layout.len() {
-                self.colors[i] = *lighting.custom.keys.get(i).unwrap_or(&[0, 0, 0]);
-            }
-            return;
-        }
-
-        let fps = anim.fps.clamp(5, 60) as f32;
-        let speed = 0.2 + anim.speed as f32 / 100.0 * 2.4;
-        self.anim_time += dt * speed;
-        self.anim_accum += dt;
-        if self.anim_accum >= 1.0 / fps || self.anim_colors.len() != layout.len() {
-            self.anim_accum = 0.0;
-            self.anim_colors = self.sample_animation(anim, layout.len(), self.anim_time);
-        }
-        for (i, key) in layout.keys.iter().enumerate() {
-            let phase = dir_phase(anim.direction, center_x(key, layout), center_y(key));
-            let modulation = 0.55 + 0.45 * ((phase * 3.0 - self.anim_time * 1.4) * TAU).sin();
-            self.colors[i] = scale(self.anim_colors[i], modulation.max(0.12));
+    fn custom(&mut self, lighting: &Lighting, layout: &Layout) {
+        for i in 0..layout.len() {
+            self.colors[i] = *lighting.custom.keys.get(i).unwrap_or(&[0, 0, 0]);
         }
     }
 
-    fn sample_animation(&self, anim: &AnimPreset, len: usize, time: f32) -> Vec<[u8; 3]> {
-        let duration = anim.duration_ms() as f32;
-        let mut t = (time * 1000.0).rem_euclid(duration);
-        let frames = &anim.keyframes;
-        let mut out = vec![[0u8, 0, 0]; len];
-        if frames.is_empty() {
-            return out;
+    fn picture(&mut self, lighting: &Lighting, layout: &Layout, picture: Option<&[[u8; 3]]>) {
+        for i in 0..layout.len() {
+            self.colors[i] = *picture
+                .and_then(|keys| keys.get(i))
+                .or_else(|| lighting.custom.keys.get(i))
+                .unwrap_or(&[0, 0, 0]);
         }
-        let mut prev = &frames[0];
-        let mut next = &frames[0];
-        for (index, frame) in frames.iter().enumerate() {
-            if frame.t_ms as f32 <= t {
-                prev = frame;
-                next = frames.get(index + 1).unwrap_or(&frames[0]);
-            }
-        }
-        let start = prev.t_ms as f32;
-        let mut end = next.t_ms as f32;
-        if end <= start {
-            end = start + duration;
-        }
-        if next.t_ms as f32 <= t {
-            t += duration;
-        }
-        let span = (end - start).max(1.0);
-        let blend = ((t - start) / span).clamp(0.0, 1.0);
-        for i in 0..len {
-            let a = *prev.keys.get(i).unwrap_or(&[0, 0, 0]);
-            let b = *next.keys.get(i).unwrap_or(&[0, 0, 0]);
-            out[i] = mix(a, b, blend);
-        }
-        out
     }
 
     fn music(&mut self, lighting: &Lighting, layout: &Layout, dt: f32, live: &LiveInputs<'_>) {
         let cfg = &lighting.music;
-        let smoothing = cfg.smoothing.clamp(0.0, 0.95);
-        let follow = (1.0 - smoothing) * (dt * 60.0).clamp(0.15, 2.0);
+        // Fixed preview smoothing; the keyboard's bars use the raw band stream.
+        let follow = 0.65 * (dt * 60.0).clamp(0.15, 2.0);
         let mut max_band = 0.0f32;
         for band in 0..BANDS {
             let target = (live.audio.bands[band] * cfg.sensitivity * cfg.gain).clamp(0.0, 1.5);
@@ -988,7 +936,9 @@ mod tests {
         let mut last = vec![[0u8; 3]; layout.len()];
         let mut bright = false;
         for _ in 0..frames {
-            last = engine.render(&lighting, layout, 0.016, &live).to_vec();
+            last = engine
+                .render(&lighting, layout, 0.016, &live, None)
+                .to_vec();
             bright |= last.iter().any(|c| *c != [0, 0, 0]);
         }
         (last, bright)
@@ -1046,6 +996,7 @@ mod tests {
             LightingMode::Music,
             LightingMode::Screen,
             LightingMode::Custom,
+            LightingMode::Picture,
         ] {
             let mut lighting = Lighting::default();
             lighting.mode = mode;
@@ -1056,7 +1007,7 @@ mod tests {
                 audio: &audio,
                 screen: &screen,
             };
-            let colors = engine.render(&lighting, layout, 0.016, &live);
+            let colors = engine.render(&lighting, layout, 0.016, &live, None);
             assert_eq!(colors.len(), 68);
         }
     }

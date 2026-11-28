@@ -147,7 +147,7 @@ impl KnobTurn {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Settings {
-    /// Never touch the real HID device; build and log packets only.
+    /// Never touch the real HID device; build packets only.
     #[serde(default = "default_true")]
     pub dry_run: bool,
     /// Install the low-level keyboard hook (needed for remap, macros, tester, hotkeys).
@@ -171,8 +171,6 @@ pub struct Settings {
     /// Rate for the live music (`0x0D`) and screen (`0x0E`) streams.
     #[serde(default = "default_stream_fps")]
     pub stream_fps: u8,
-    #[serde(default = "default_true")]
-    pub log_packets: bool,
     /// Ask the firmware to store the profile in its own slot when switching.
     #[serde(default = "default_true")]
     pub sync_profile_to_hardware: bool,
@@ -199,7 +197,6 @@ impl Default for Settings {
             knob_turn: KnobTurn::Volume,
             show_keymap_rgb: true,
             stream_fps: default_stream_fps(),
-            log_packets: true,
             sync_profile_to_hardware: true,
         }
     }

@@ -2,16 +2,14 @@
 //!
 //! `KeyboardDriver` is the boundary between the app and the keyboard. The LK67
 //! implementation talks HID when a device is open and otherwise (or when Dry-Run is
-//! enabled) validates and logs the exact packets it would have sent.
+//! enabled) validates the exact packets it would have sent.
 //!
 //! All protocol constants live in [`lk67`]; see the module docs there before trusting
 //! any report ID or byte layout.
 
 pub mod lk67;
 
-use std::collections::VecDeque;
 use std::fmt;
-use std::time::Instant;
 
 use hidapi::{HidApi, HidDevice};
 
@@ -85,7 +83,7 @@ fn query_report_caps(_path: &std::ffi::CStr) -> Option<(usize, usize)> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DeviceStatus {
     Disconnected,
-    /// No hardware writes; packets are validated and logged.
+    /// No hardware writes; packets are validated but not sent.
     Simulation,
     Connected {
         path: String,
@@ -111,90 +109,6 @@ impl DeviceStatus {
 }
 
 #[derive(Clone, Debug)]
-pub struct HidRecord {
-    pub path: String,
-    pub vendor_id: u16,
-    pub product_id: u16,
-    pub product: String,
-    pub manufacturer: String,
-    pub interface: i32,
-    pub usage_page: u16,
-    pub usage: u16,
-    /// Bytes the collection accepts per output/feature report (0 = not supported).
-    pub output_len: usize,
-    pub feature_len: usize,
-    pub is_match: bool,
-}
-
-impl HidRecord {
-    pub fn title(&self) -> String {
-        format!(
-            "{:04X}:{:04X}  {}",
-            self.vendor_id,
-            self.product_id,
-            if self.product.is_empty() {
-                "(unnamed HID device)"
-            } else {
-                &self.product
-            }
-        )
-    }
-
-    pub fn is_vendor(&self) -> bool {
-        self.usage_page >= 0xFF00
-    }
-
-    pub fn is_writable(&self) -> bool {
-        self.output_len > 0 || self.feature_len > 0
-    }
-
-    pub fn is_write_restricted(&self) -> bool {
-        !self.is_writable()
-    }
-
-    pub fn collection_kind(&self) -> &'static str {
-        match (self.usage_page, self.usage) {
-            (0x01, 0x06) => "keyboard, read-only",
-            (0x01, 0x02) => "mouse, read-only",
-            (0x01, 0x80) => "system control",
-            (0x0C, _) => "consumer control",
-            (page, _) if page >= 0xFF00 => "vendor",
-            _ => "other",
-        }
-    }
-
-    pub fn subtitle(&self) -> String {
-        let mut parts = Vec::new();
-        if !self.manufacturer.is_empty() {
-            parts.push(self.manufacturer.clone());
-        }
-        parts.push(format!("interface {}", self.interface));
-        parts.push(format!(
-            "usage {:04X}/{:04X} ({})",
-            self.usage_page,
-            self.usage,
-            self.collection_kind()
-        ));
-        parts.push(if self.is_writable() {
-            format!("out {} / feature {}", self.output_len, self.feature_len)
-        } else {
-            "no writable report".to_string()
-        });
-        parts.push(self.path.clone());
-        parts.join("  \u{2022}  ")
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct PacketLogEntry {
-    pub at: Instant,
-    pub label: String,
-    pub bytes: Vec<u8>,
-    pub ok: bool,
-    pub note: String,
-}
-
-#[derive(Clone, Debug)]
 pub enum DriverError {
     NotConnected,
     Hid(String),
@@ -217,7 +131,7 @@ pub trait KeyboardDriver {
     fn is_dry_run(&self) -> bool;
     fn set_dry_run(&mut self, dry_run: bool);
     fn rescan(&mut self);
-    /// Raw report write (also used by the packet inspector).
+    /// Raw report write used by the probe CLI.
     fn send_report(&mut self, label: &str, report: &[u8]) -> Result<(), DriverError>;
     /// Hardware effect, palette, brightness, speed and direction.
     fn apply_lighting(&mut self, lighting: &Lighting) -> Result<usize, DriverError>;
@@ -238,8 +152,6 @@ pub trait KeyboardDriver {
     fn select_profile(&mut self, slot: u8) -> Result<(), DriverError>;
     /// Non-blocking read of hardware input reports (placeholder parsing).
     fn poll(&mut self) -> Vec<Vec<u8>>;
-    fn log(&self) -> &VecDeque<PacketLogEntry>;
-    fn clear_log(&mut self);
 }
 
 #[derive(Clone, Debug)]
@@ -347,9 +259,7 @@ pub struct Lk67Driver {
     api: Option<HidApi>,
     device: Option<HidDevice>,
     status: DeviceStatus,
-    log: VecDeque<PacketLogEntry>,
     last_error: Option<String>,
-    writes: u64,
     opened_usage: Option<(u16, u16)>,
     opened_caps: Option<(usize, usize)>,
 }
@@ -366,9 +276,7 @@ impl Lk67Driver {
             } else {
                 DeviceStatus::Disconnected
             },
-            log: VecDeque::with_capacity(200),
             last_error: None,
-            writes: 0,
             opened_usage: None,
             opened_caps: None,
         };
@@ -378,36 +286,8 @@ impl Lk67Driver {
         driver
     }
 
-    pub fn set_config(&mut self, cfg: DriverConfig) {
-        self.cfg = cfg;
-        self.cfg.normalize();
-    }
-
     pub fn last_error(&self) -> Option<&str> {
         self.last_error.as_deref()
-    }
-
-    pub fn writes(&self) -> u64 {
-        self.writes
-    }
-
-    fn note(
-        &mut self,
-        label: impl Into<String>,
-        bytes: Vec<u8>,
-        ok: bool,
-        note: impl Into<String>,
-    ) {
-        self.log.push_back(PacketLogEntry {
-            at: Instant::now(),
-            label: label.into(),
-            bytes,
-            ok,
-            note: note.into(),
-        });
-        while self.log.len() > 300 {
-            self.log.pop_front();
-        }
     }
 
     fn ensure_api(&mut self) -> Result<(), DriverError> {
@@ -422,44 +302,6 @@ impl Lk67Driver {
             }
         }
         Ok(())
-    }
-
-    /// Every HID device the OS knows about, for the discovery list.
-    pub fn discover(&mut self) -> Vec<HidRecord> {
-        if let Err(err) = self.ensure_api() {
-            self.last_error = Some(err.to_string());
-            return Vec::new();
-        }
-        let Some(api) = self.api.as_ref() else {
-            return Vec::new();
-        };
-        let cfg = self.cfg.clone();
-        api.device_list()
-            .map(|info| {
-                let vendor_id = info.vendor_id();
-                let product_id = info.product_id();
-                let (output_len, feature_len) = if info.usage_page() >= 0xFF00 {
-                    query_report_caps(info.path()).unwrap_or((0, 0))
-                } else {
-                    (0, 0)
-                };
-                HidRecord {
-                    path: info.path().to_string_lossy().into_owned(),
-                    vendor_id,
-                    product_id,
-                    product: info.product_string().unwrap_or("").to_string(),
-                    manufacturer: info.manufacturer_string().unwrap_or("").to_string(),
-                    interface: info.interface_number(),
-                    usage_page: info.usage_page(),
-                    usage: info.usage(),
-                    output_len,
-                    feature_len,
-                    is_match: vendor_id == cfg.vid
-                        && product_id == cfg.pid
-                        && (cfg.interface < 0 || info.interface_number() == cfg.interface),
-                }
-            })
-            .collect()
     }
 
     /// Open a specific HID path (from the discovery list).
@@ -497,7 +339,6 @@ impl Lk67Driver {
             manufacturer,
             interface: meta.map(|m| m.0).unwrap_or(self.cfg.interface),
         };
-        self.note("Open device", Vec::new(), true, path.to_string());
         Ok(())
     }
 
@@ -537,14 +378,13 @@ impl Lk67Driver {
                 true
             }
             Err(err) => {
-                self.last_error = Some(err.clone());
-                self.note("Open failed", Vec::new(), false, err);
+                self.last_error = Some(err);
                 false
             }
         }
     }
 
-    fn read_feature(&mut self, label: &str, request: Vec<u8>) -> Result<Vec<u8>, DriverError> {
+    fn read_feature(&mut self, _label: &str, request: Vec<u8>) -> Result<Vec<u8>, DriverError> {
         if self.dry_run {
             return Err(DriverError::Hid("dry-run is enabled".into()));
         }
@@ -570,18 +410,9 @@ impl Lk67Driver {
             }
         };
         match result {
-            Ok(data) => {
-                self.note(
-                    label,
-                    request,
-                    true,
-                    format!("read {} data bytes", data.len()),
-                );
-                Ok(data)
-            }
+            Ok(data) => Ok(data),
             Err(message) => {
                 self.last_error = Some(message.clone());
-                self.note(label, request, false, message.clone());
                 Err(DriverError::Hid(message))
             }
         }
@@ -616,16 +447,14 @@ impl Lk67Driver {
         Ok(slots)
     }
 
-    fn write_packet(&mut self, label: &str, report: Vec<u8>) -> Result<(), DriverError> {
+    fn write_packet(&mut self, _label: &str, report: Vec<u8>) -> Result<(), DriverError> {
         if self.dry_run {
-            self.note(label, report, true, "dry-run (not written)");
             return Ok(());
         }
         if self.device.is_none() {
             self.try_open_configured();
         }
         let Some(device) = self.device.as_ref() else {
-            self.note(label, report, false, "device not open");
             return Err(DriverError::NotConnected);
         };
         let transport = self.cfg.transport;
@@ -644,22 +473,11 @@ impl Lk67Driver {
                 && transport == ReportTransport::OutputReport
                 && device.send_feature_report(&report).is_ok()
             {
-                self.writes += 1;
-                self.note(
-                    label,
-                    report,
-                    true,
-                    "output report denied; sent as feature report",
-                );
                 return Ok(());
             }
         }
         match result {
-            Ok(written) => {
-                self.writes += 1;
-                self.note(label, report, true, format!("wrote {written} bytes"));
-                Ok(())
-            }
+            Ok(_) => Ok(()),
             Err(err) => {
                 let text = err.to_string();
                 let denied = text.contains("0x00000005")
@@ -685,7 +503,6 @@ impl Lk67Driver {
                 self.last_error = Some(message.clone());
                 self.device = None;
                 self.status = DeviceStatus::Disconnected;
-                self.note(label, report, false, message.clone());
                 Err(DriverError::Hid(message))
             }
         }
@@ -758,7 +575,6 @@ impl KeyboardDriver for Lk67Driver {
             self.opened_usage = None;
             self.opened_caps = None;
             self.status = DeviceStatus::Simulation;
-            self.note("Mode", Vec::new(), true, "dry-run enabled");
         } else {
             self.status = DeviceStatus::Disconnected;
             self.rescan();
@@ -779,32 +595,8 @@ impl KeyboardDriver for Lk67Driver {
             self.last_error = Some(err.to_string());
             return;
         }
-        let count = self
-            .api
-            .as_ref()
-            .map(|a| a.device_list().count())
-            .unwrap_or(0);
-        if self.try_open_configured() {
-            self.note(
-                "Scan",
-                Vec::new(),
-                true,
-                format!(
-                    "{count} HID devices, opened {:04X}:{:04X}",
-                    self.cfg.vid, self.cfg.pid
-                ),
-            );
-        } else {
+        if !self.try_open_configured() {
             self.status = DeviceStatus::Disconnected;
-            self.note(
-                "Scan",
-                Vec::new(),
-                false,
-                format!(
-                    "{count} HID devices; no match for {:04X}:{:04X}",
-                    self.cfg.vid, self.cfg.pid
-                ),
-            );
         }
     }
 
@@ -920,14 +712,6 @@ impl KeyboardDriver for Lk67Driver {
             }
         }
         reports
-    }
-
-    fn log(&self) -> &VecDeque<PacketLogEntry> {
-        &self.log
-    }
-
-    fn clear_log(&mut self) {
-        self.log.clear();
     }
 }
 

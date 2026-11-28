@@ -2,8 +2,8 @@
 //!
 //! Every mode produces one RGB value per key per frame:
 //! * the 13 hardware effects are previewed here so the UI can show them even in dry-run,
-//! * custom palettes / keyframe animations are computed locally and streamed as per-key
-//!   colours,
+//! * custom per-key colours and picture mappings are painted locally and
+//!   previewed on the keymap,
 //! * music and screen-follow modes turn live input into per-key colours.
 
 pub mod effects;

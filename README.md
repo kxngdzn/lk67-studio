@@ -11,13 +11,12 @@ cargo run --release
 
 Windows 10/11, Rust 1.85+ (edition 2024).
 
-1. **Driver & packets** → **Rescan HID devices**. The keyboard is matched by VID/PID
-   (`0x3151:0x4015`). Dry-run is on by default, so nothing is written until you select the device
-   and press **Use device**.
+1. Start the app. It matches the keyboard by VID/PID (`0x3151:0x4015`), and dry-run is on by
+   default, so nothing is written until you clear **Dry-run** in the top bar.
 2. **Remap & keymap** → select a key and assign a key, combo, media key, macro, RGB command or
    profile action.
-3. **Lighting** → pick one of the 13 hardware effects (or Custom / Music / Screen) and press
-   **Write effect + palette**.
+3. **Lighting** → pick one of the 13 hardware effects, or Custom / Picture / Music / Screen.
+   Changes are written as soon as the control settles.
 
 Settings save automatically to `%APPDATA%\LK67 Studio\config.json` (debounced, atomic write).
 
@@ -34,8 +33,9 @@ Settings save automatically to `%APPDATA%\LK67 Studio\config.json` (debounced, a
 - **Macros** — record live or build steps (down, up, tap, combo, delay), set repeats or
   hold-to-repeat, bind to a key and preview playback on a cancellable thread.
 - **RGB** — 13 hardware effects with a 14-slot palette, brightness, speed and direction; custom
-  per-key painting, presets and keyframe animations; music-reactive (WASAPI loopback or mic, FFT)
-  and screen-follow (GDI) modes. Effects preview in the app even in dry-run.
+  per-key painting, four-colour gradient fills and presets; picture effects for PNG, JPEG, GIF, BMP
+  and WebP (animated GIFs use their first frame); music-reactive (WASAPI loopback or mic, FFT) and
+  screen-follow (GDI) modes. Effects preview in the app even in dry-run.
 - **Key tester** — press counters, hold times, heatmap and a per-key log, fed by the hook and the
   app's own input.
 
@@ -45,9 +45,9 @@ Settings save automatically to `%APPDATA%\LK67 Studio\config.json` (debounced, a
 src/
 ├── main.rs                 eframe entry point
 ├── app.rs                  shell: tick loop, events, save, hotkeys
-├── model/                  keycodes, layout, actions, macros, lighting, profiles, store
+├── model/                  keycodes, layout, actions, macros, lighting, pictures, profiles, store
 ├── driver/
-│   ├── mod.rs              KeyboardDriver trait, HID discovery, dry-run log
+│   ├── mod.rs              KeyboardDriver trait, device matching, dry-run
 │   └── lk67.rs             yc500 report IDs, packet builders, checksums
 ├── rgb/
 │   ├── effects.rs          software renderer for all effects
@@ -87,10 +87,8 @@ The knob press arrives as mute (`0xAD`) on this firmware although the layout mod
 
 A keyboard exposes several HID collections. Windows denies output writes on OS-claimed ones, and the
 LK67's control collection (vendor interface 2, `0xFFFF/0002`) has a 65-byte feature report but no
-output report, so packets are sent with `HID SetFeature`. Discovery marks each collection **VENDOR**
-(writable), **INPUT-ONLY** or **READ-ONLY** and picks a writable vendor collection automatically;
-**Use vendor** pins a specific one. Dry-run builds the same packets and logs them (hex + decoded
-fields) in **Driver & packets**.
+output report, so packets are sent with `HID SetFeature`. The app picks a writable vendor
+collection automatically. Dry-run builds the same packets without sending them.
 
 ## Limitations
 
@@ -105,15 +103,15 @@ fields) in **Driver & packets**.
 - **Live modes use the firmware's host-fed lighting**: music in modes 20/22 from `0x0D`, screen
   follow in mode 21 from `0x0E`. The board's rendering is simpler than the in-app preview.
 - **Per-key pictures are flash-backed** and uploaded on demand from a worker thread; streaming them
-  would stall the control endpoint.
+  would stall the control endpoint. A **Picture** effect maps one still image, so an animated GIF is
+  reduced to its first frame.
 - Software remapping, macros and reactive effects need the app running.
 - Screen follow captures the primary monitor with GDI; music needs a render device or microphone.
 
 ## Troubleshooting
 
-- `HID write failed ... 0x00000005` (access denied) or `0x00000001` — the selected collection has no
-  writable report, or the transport is output. Pick a **VENDOR** row with a feature report
-  (`0xFFFF/0002`, interface 2) and keep **Transport** on *Feature report*.
+- `HID write failed ... 0x00000005` (access denied) or `0x00000001` — the app could not open the
+  writable control collection. Reconnect the keyboard and try **Driver → Rescan / reconnect**.
 - `lk67-studio.exe --probe` prints the collection and interface the app opens.
 - No device found — rescan and confirm the cable and VID/PID (`0x3151:0x4015`).
 

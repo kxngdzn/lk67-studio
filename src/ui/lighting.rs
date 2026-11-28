@@ -1,12 +1,12 @@
-//! Lighting page: hardware effects, palette, custom per-key layouts and animations.
+//! Lighting page: hardware effects, palette and custom per-key layouts.
 
 use egui::RichText;
 
 use crate::app::App;
 use crate::driver::lk67;
-use crate::model::layout::KEY_COUNT;
+use crate::model::layout::{KEY_COUNT, layout};
 use crate::model::lighting::{
-    AnimPreset, CustomPreset, Direction, HARDWARE_EFFECTS, Keyframe, Lighting, LightingMode,
+    CustomPreset, Direction, HARDWARE_EFFECTS, ImageFit, Lighting, LightingMode,
 };
 use crate::ui::Page;
 use crate::ui::theme;
@@ -52,6 +52,7 @@ pub fn draw(app: &mut App, ui: &mut egui::Ui) {
     match mode {
         LightingMode::Hardware => hardware(app, ui, index),
         LightingMode::Custom => custom(app, ui, index),
+        LightingMode::Picture => picture(app, ui, index),
         LightingMode::Music | LightingMode::Screen => live_summary(app, ui, mode),
     }
 
@@ -71,7 +72,7 @@ fn live_summary(app: &mut App, ui: &mut egui::Ui, mode: LightingMode) {
             ui,
             match mode {
                 LightingMode::Music => {
-                    "The keyboard draws its own bars from the live band stream. Capture source, sensitivity and visual live on the Music reactive page."
+                    "The keyboard draws its own bars from the live band stream. Choose the capture source and start or stop it on the Music reactive page."
                 }
                 _ => {
                     "The keyboard paints one blended colour from the captured region. Region, grid and colour shaping live on the Screen follow page."
@@ -109,6 +110,149 @@ fn live_summary(app: &mut App, ui: &mut egui::Ui, mode: LightingMode) {
     });
 }
 
+fn picture(app: &mut App, ui: &mut egui::Ui, index: usize) {
+    let mut choose = false;
+    let mut reload = false;
+    let mut clear = false;
+    let mut send = false;
+    let uploading = app.ui.lighting_uploading;
+    let has_picture = app.picture.is_some();
+    let info = app
+        .picture
+        .as_ref()
+        .map(|picture| (picture.width, picture.height));
+    let error = app.picture_error.clone();
+    let path_label = {
+        let path = &app.cfg.profiles[index].lighting.picture.path;
+        if path.trim().is_empty() {
+            "No picture selected".to_string()
+        } else {
+            widgets::truncate(path, 58)
+        }
+    };
+
+    ui.columns(2, |cols| {
+        theme::card(&mut cols[0], "Picture effect", |ui| {
+            let lighting = &mut app.cfg.profiles[index].lighting;
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Choose image...").clicked() {
+                    choose = true;
+                }
+                if ui
+                    .add_enabled(
+                        !lighting.picture.path.trim().is_empty(),
+                        egui::Button::new("Reload"),
+                    )
+                    .clicked()
+                {
+                    reload = true;
+                }
+                if ui.button("Clear").clicked() {
+                    clear = true;
+                }
+            });
+            ui.label(
+                RichText::new(path_label.clone())
+                    .size(11.0)
+                    .color(theme::MUTED),
+            );
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                ui.label("Fit");
+                egui::ComboBox::from_id_salt("picture-fit")
+                    .selected_text(lighting.picture.fit.label())
+                    .width(210.0)
+                    .show_ui(ui, |ui| {
+                        for fit in ImageFit::ALL {
+                            if ui
+                                .selectable_value(
+                                    &mut lighting.picture.fit,
+                                    fit,
+                                    fit.label(),
+                                )
+                                .clicked()
+                            {
+                                ui.close();
+                            }
+                        }
+                    });
+            });
+            if widgets::slider_percent(ui, "Brightness", &mut lighting.brightness) {
+                app.ui.dirty = true;
+            }
+            ui.add_space(4.0);
+            let button = if uploading {
+                egui::Button::new("Uploading picture...").fill(theme::ACCENT_DIM)
+            } else {
+                egui::Button::new("Send picture").fill(theme::ACCENT_DIM)
+            };
+            if ui.add_enabled(!uploading && has_picture, button).clicked() {
+                send = true;
+            }
+            theme::hint(
+                ui,
+                "PNG, JPEG, GIF, BMP and WebP. Animated GIFs use their first frame.",
+            );
+        });
+
+        let left_height = cols[0].min_rect().height();
+        theme::card_fill(&mut cols[1], "Picture preview", left_height, |ui| {
+            if let Some((width, height)) = info {
+                ui.label(
+                    RichText::new(format!("{width} x {height} px"))
+                        .size(14.0)
+                        .strong(),
+                );
+                ui.add_space(4.0);
+                theme::hint(
+                    ui,
+                    "The keyboard canvas above is the live preview. Changing Fit or the image reloads it here.",
+                );
+            } else if let Some(err) = &error {
+                widgets::status_text(ui, err, false);
+                theme::hint(ui, "Choose another file or check that it still exists.");
+            } else {
+                theme::hint(ui, "Choose an image to map it onto the 68 keys.");
+            }
+            ui.add_space(4.0);
+            theme::hint(
+                ui,
+                "The LK67's per-key picture is flash-backed and holds one still image.",
+            );
+        });
+    });
+
+    if choose {
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("Images", &["png", "jpg", "jpeg", "gif", "bmp", "webp"])
+            .pick_file()
+        {
+            let lighting = &mut app.cfg.profiles[index].lighting;
+            lighting.picture.path = path.display().to_string();
+            lighting.mode = LightingMode::Picture;
+            app.load_picture();
+            app.ui.dirty = true;
+        }
+    }
+    if reload {
+        app.load_picture();
+    }
+    if clear {
+        let lighting = &mut app.cfg.profiles[index].lighting;
+        lighting.picture.path.clear();
+        lighting.mode = LightingMode::Hardware;
+        app.picture = None;
+        app.picture_error = None;
+        app.picture_attempt = None;
+        app.ui.dirty = true;
+        app.ui.apply_lighting = true;
+        app.notify("Picture cleared; switched to hardware effects");
+    }
+    if send {
+        app.upload_picture();
+    }
+}
+
 fn static_lighting_changed(before: &Lighting, after: &Lighting) -> bool {
     before.mode != after.mode
         || before.effect != after.effect
@@ -117,6 +261,7 @@ fn static_lighting_changed(before: &Lighting, after: &Lighting) -> bool {
         || before.speed != after.speed
         || before.direction != after.direction
         || before.custom.keys != after.custom.keys
+        || before.picture != after.picture
 }
 
 fn hardware(app: &mut App, ui: &mut egui::Ui, index: usize) {
@@ -152,13 +297,16 @@ fn hardware(app: &mut App, ui: &mut egui::Ui, index: usize) {
         });
 
         let left_height = cols[0].min_rect().height();
-        theme::card_fill(
-            &mut cols[1],
-            "Palette, brightness and motion",
-            left_height,
-            |ui| {
-                let driver_cfg = app.cfg.driver.clone();
-                let lighting = &mut app.cfg.profiles[index].lighting;
+        let uses_color = HARDWARE_EFFECTS[app.cfg.profiles[index].lighting.effect].uses_color;
+        let title = if uses_color {
+            "Palette, brightness and motion"
+        } else {
+            "Brightness and motion"
+        };
+        theme::card_fill(&mut cols[1], title, left_height, |ui| {
+            let driver_cfg = app.cfg.driver.clone();
+            let lighting = &mut app.cfg.profiles[index].lighting;
+            if uses_color {
                 ui.horizontal(|ui| {
                     ui.label("Primary colour");
                     ui.color_edit_button_srgb(&mut lighting.colors[0]);
@@ -178,68 +326,76 @@ fn hardware(app: &mut App, ui: &mut egui::Ui, index: usize) {
                     app.ui.paint_color = lighting.colors[slot];
                 }
                 ui.add_space(4.0);
-                if widgets::slider_percent(ui, "Brightness", &mut lighting.brightness) {
-                    app.ui.dirty = true;
-                }
-                if widgets::slider_percent(ui, "Speed", &mut lighting.speed) {
-                    app.ui.dirty = true;
-                }
-                ui.horizontal(|ui| {
-                    ui.label("Direction");
-                    egui::ComboBox::from_id_salt("light-dir")
-                        .selected_text(lighting.direction.label())
-                        .width(190.0)
-                        .show_ui(ui, |ui| {
-                            for direction in Direction::ALL {
-                                if ui
-                                    .selectable_value(
-                                        &mut lighting.direction,
-                                        direction,
-                                        direction.label(),
-                                    )
-                                    .clicked()
-                                {
-                                    ui.close();
-                                }
-                            }
-                        });
-                });
+            } else {
+                theme::hint(
+                    ui,
+                    "This effect uses fixed colours, so the palette slots are ignored.",
+                );
                 ui.add_space(4.0);
-                let effect = &HARDWARE_EFFECTS[lighting.effect];
-                theme::hint(
-                    ui,
-                    format!(
-                        "{} - {}{}",
-                        lighting.effect_def().name,
-                        if effect.animated {
-                            "animated: speed and direction apply"
-                        } else {
-                            "static: speed and direction are ignored"
-                        },
-                        if effect.uses_color {
-                            ", palette colours used"
-                        } else {
-                            ""
+            }
+            if widgets::slider_percent(ui, "Brightness", &mut lighting.brightness) {
+                app.ui.dirty = true;
+            }
+            if widgets::slider_percent(ui, "Speed", &mut lighting.speed) {
+                app.ui.dirty = true;
+            }
+            ui.horizontal(|ui| {
+                ui.label("Direction");
+                egui::ComboBox::from_id_salt("light-dir")
+                    .selected_text(lighting.direction.label())
+                    .width(190.0)
+                    .show_ui(ui, |ui| {
+                        for direction in Direction::ALL {
+                            if ui
+                                .selectable_value(
+                                    &mut lighting.direction,
+                                    direction,
+                                    direction.label(),
+                                )
+                                .clicked()
+                            {
+                                ui.close();
+                            }
                         }
-                    ),
-                );
-                let report = lk67::build_effect_report(&driver_cfg, lighting);
-                theme::hint(
-                    ui,
-                    format!(
-                        "Packet ({} bytes): {}",
-                        report.len(),
-                        widgets::truncate(&lk67::hex_dump(&report), 64)
-                    ),
-                );
+                    });
+            });
+            ui.add_space(4.0);
+            let effect = &HARDWARE_EFFECTS[lighting.effect];
+            theme::hint(
+                ui,
+                format!(
+                    "{} - {}{}",
+                    lighting.effect_def().name,
+                    if effect.animated {
+                        "animated: speed and direction apply"
+                    } else {
+                        "static: speed and direction are ignored"
+                    },
+                    if effect.uses_color {
+                        ", palette colours used"
+                    } else {
+                        ", fixed colours"
+                    }
+                ),
+            );
+            let report = lk67::build_effect_report(&driver_cfg, lighting);
+            theme::hint(
+                ui,
+                format!(
+                    "Packet ({} bytes): {}",
+                    report.len(),
+                    widgets::truncate(&lk67::hex_dump(&report), 64)
+                ),
+            );
+            if uses_color {
                 ui.horizontal(|ui| {
                     if ui.button("Reset palette").clicked() {
                         lighting.colors = crate::model::lighting::default_palette();
                         app.ui.dirty = true;
                     }
                 });
-            },
-        );
+            }
+        });
     });
 }
 
@@ -248,9 +404,6 @@ fn custom(app: &mut App, ui: &mut egui::Ui, index: usize) {
     let mut save_preset = false;
     let mut load_preset: Option<usize> = None;
     let mut delete_preset: Option<usize> = None;
-    let mut save_anim = false;
-    let mut load_anim: Option<usize> = None;
-    let mut delete_anim: Option<usize> = None;
 
     ui.columns(2, |cols| {
         theme::card(&mut cols[0], "Paint the keymap", |ui| {
@@ -275,31 +428,53 @@ fn custom(app: &mut App, ui: &mut egui::Ui, index: usize) {
                 if ui.button("Fill all").clicked() {
                     let color = app.ui.paint_color;
                     lighting.custom.fill(color);
-                    lighting.animation_playing = false;
                     app.ui.dirty = true;
                 }
                 if ui.button("Clear").clicked() {
                     lighting.custom.fill([0, 0, 0]);
-                    lighting.animation_playing = false;
                     app.ui.dirty = true;
                 }
                 if ui.button("Sample preview").clicked() {
                     lighting.custom.keys = app.colors.clone();
-                    lighting.animation_playing = false;
                     app.ui.dirty = true;
                 }
             });
+            ui.add_space(4.0);
+            let mut gradient = false;
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("Gradient").size(11.0).color(theme::MUTED));
+                for slot in 0..4 {
+                    if ui
+                        .color_edit_button_srgb(&mut lighting.colors[slot])
+                        .changed()
+                    {
+                        app.ui.dirty = true;
+                    }
+                }
+                if ui.button("Fill gradient").clicked() {
+                    gradient = true;
+                }
+            });
+            if gradient {
+                let stops = [
+                    lighting.colors[0],
+                    lighting.colors[1],
+                    lighting.colors[2],
+                    lighting.colors[3],
+                ];
+                lighting.custom.ensure_len(KEY_COUNT);
+                lighting.custom.fill_gradient(layout(), &stops);
+                app.ui.dirty = true;
+            }
+            theme::hint(
+                ui,
+                "Gradient uses palette slots 1-4 as stops and spreads them left to right.",
+            );
             ui.add_space(4.0);
             theme::hint(
                 ui,
                 "Click or drag on the 65% canvas (Paint tool) to set per-key colours. Clicking a key also selects it.",
             );
-            if app.cfg.profiles[index].lighting.animation_playing {
-                theme::hint(
-                    ui,
-                    "A keyframe animation is playing and hides the painted layout; painting or Load turns it off.",
-                );
-            }
             ui.add_space(4.0);
             let uploading = app.ui.lighting_uploading;
             let button = if uploading {
@@ -356,146 +531,6 @@ fn custom(app: &mut App, ui: &mut egui::Ui, index: usize) {
         });
     });
 
-    ui.add_space(8.0);
-    ui.columns(2, |cols| {
-        theme::card(&mut cols[0], "Keyframe animation", |ui| {
-            let lighting = &mut app.cfg.profiles[index].lighting;
-            ui.horizontal(|ui| {
-                if ui
-                    .checkbox(&mut lighting.animation_playing, "Play animation")
-                    .changed()
-                {
-                    app.ui.dirty = true;
-                }
-                ui.label(
-                    RichText::new(format!("{} frames", lighting.animation.keyframes.len()))
-                        .size(11.0)
-                        .color(theme::MUTED),
-                );
-            });
-            let mut fps = lighting.animation.fps as f32;
-            if ui
-                .add(egui::Slider::new(&mut fps, 5.0..=60.0).text("FPS"))
-                .changed()
-            {
-                lighting.animation.fps = fps.round() as u8;
-                app.ui.dirty = true;
-            }
-            if widgets::slider_percent(ui, "Playback speed", &mut lighting.animation.speed) {
-                app.ui.dirty = true;
-            }
-            ui.horizontal(|ui| {
-                ui.label("Direction");
-                egui::ComboBox::from_id_salt("anim-dir")
-                    .selected_text(lighting.animation.direction.label())
-                    .width(170.0)
-                    .show_ui(ui, |ui| {
-                        for direction in Direction::ALL {
-                            if ui
-                                .selectable_value(
-                                    &mut lighting.animation.direction,
-                                    direction,
-                                    direction.label(),
-                                )
-                                .clicked()
-                            {
-                                ui.close();
-                            }
-                        }
-                    });
-            });
-            ui.horizontal(|ui| {
-                if ui.button("Capture current layout").clicked() {
-                    let t = lighting.animation.duration_ms();
-                    lighting.animation.keyframes.push(Keyframe {
-                        t_ms: t,
-                        keys: lighting.custom.keys.clone(),
-                    });
-                    lighting.animation.ensure_len(KEY_COUNT);
-                    lighting.animation_playing = true;
-                    app.ui.dirty = true;
-                    app.ui.notify("Captured keyframe from the custom layout");
-                }
-                if ui.button("Capture preview frame").clicked() {
-                    let keys = app.colors.clone();
-                    let t = lighting.animation.duration_ms();
-                    lighting.animation.keyframes.push(Keyframe { t_ms: t, keys });
-                    lighting.animation_playing = true;
-                    app.ui.dirty = true;
-                }
-            });
-            let frames = lighting.animation.keyframes.clone();
-            egui::ScrollArea::vertical()
-                .max_height(110.0)
-                .auto_shrink([false, true])
-                .show(ui, |ui| {
-                    if frames.is_empty() {
-                        theme::hint(ui, "Add at least one keyframe.");
-                    }
-                    for (frame_index, frame) in frames.iter().enumerate() {
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                RichText::new(format!(
-                                    "#{}  t={} ms",
-                                    frame_index + 1,
-                                    frame.t_ms
-                                ))
-                                .size(11.0),
-                            );
-                            if ui.small_button("Delete").clicked() {
-                                lighting.animation.keyframes.remove(frame_index);
-                                app.ui.dirty = true;
-                            }
-                        });
-                    }
-                });
-            ui.horizontal(|ui| {
-                ui.add(
-                    egui::TextEdit::singleline(&mut app.ui.anim_name)
-                        .hint_text("Animation name")
-                        .desired_width(140.0),
-                );
-                if ui.button("Save animation").clicked() {
-                    save_anim = true;
-                }
-            });
-        });
-
-        let left_height = cols[0].min_rect().height();
-        theme::card_fill(&mut cols[1], "Animation library", left_height, |ui| {
-            let animations = app.cfg.profiles[index].lighting.animations.clone();
-            if animations.is_empty() {
-                theme::hint(ui, "Saved animations appear here.");
-            }
-            egui::ScrollArea::vertical()
-                .max_height(220.0)
-                .auto_shrink([false, true])
-                .show(ui, |ui| {
-                    for (anim_index, anim) in animations.iter().enumerate() {
-                        ui.horizontal(|ui| {
-                            ui.label(widgets::truncate(&anim.name, 20));
-                            theme::hint(ui, format!("{} fps", anim.fps));
-                            if ui.small_button("Load").clicked() {
-                                load_anim = Some(anim_index);
-                            }
-                            if ui.small_button("Delete").clicked() {
-                                delete_anim = Some(anim_index);
-                            }
-                        });
-                    }
-                });
-            ui.add_space(4.0);
-            theme::hint(
-                ui,
-                "Animations interpolate between keyframes per key; speed and direction add a wave sweep.",
-            );
-            theme::hint(
-                ui,
-                "Animated previews run in the app only: the LK67 stores one still picture in flash, so send the layout after you finish painting.",
-            );
-        });
-    });
-
     // Apply deferred edits (avoids holding profile borrows across driver calls).
     if save_preset {
         let name = if app.ui.preset_name.trim().is_empty() {
@@ -526,7 +561,6 @@ fn custom(app: &mut App, ui: &mut egui::Ui, index: usize) {
             lighting.custom.keys = preset.keys;
             lighting.custom.ensure_len(KEY_COUNT);
             lighting.mode = LightingMode::Custom;
-            lighting.animation_playing = false;
             app.ui.dirty = true;
             app.notify(format!("Loaded preset {}", preset.name));
         }
@@ -540,49 +574,6 @@ fn custom(app: &mut App, ui: &mut egui::Ui, index: usize) {
             app.ui.dirty = true;
         }
     }
-    if save_anim {
-        let name = if app.ui.anim_name.trim().is_empty() {
-            format!(
-                "Animation {}",
-                app.cfg.profiles[index].lighting.animations.len() + 1
-            )
-        } else {
-            app.ui.anim_name.trim().to_string()
-        };
-        let mut anim: AnimPreset = app.cfg.profiles[index].lighting.animation.clone();
-        anim.name = name;
-        anim.ensure_len(KEY_COUNT);
-        app.cfg.profiles[index].lighting.animations.push(anim);
-        app.ui.anim_name.clear();
-        app.ui.dirty = true;
-        app.notify("Animation saved to the library");
-    }
-    if let Some(anim_index) = load_anim {
-        if let Some(mut anim) = app.cfg.profiles[index]
-            .lighting
-            .animations
-            .get(anim_index)
-            .cloned()
-        {
-            anim.ensure_len(KEY_COUNT);
-            let lighting = &mut app.cfg.profiles[index].lighting;
-            lighting.animation = anim;
-            lighting.animation_playing = true;
-            lighting.mode = LightingMode::Custom;
-            app.ui.dirty = true;
-            app.notify("Animation loaded (preview only)");
-        }
-    }
-    if let Some(anim_index) = delete_anim {
-        if anim_index < app.cfg.profiles[index].lighting.animations.len() {
-            app.cfg.profiles[index]
-                .lighting
-                .animations
-                .remove(anim_index);
-            app.ui.dirty = true;
-        }
-    }
-
     if send_static {
         app.ui.lighting_edit_at = None;
         app.upload_custom_layout();

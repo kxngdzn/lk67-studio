@@ -1,9 +1,9 @@
 //! Lighting configuration: the 13 hardware effect slots, the 14-colour palette,
-//! per-key custom layouts, keyframe animations, music and screen-follow settings.
+//! per-key custom layouts, picture effects, music and screen-follow settings.
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::layout::KEY_COUNT;
+use crate::model::layout::{KEY_COUNT, Layout};
 
 pub const PALETTE_SLOTS: usize = 14;
 
@@ -47,18 +47,21 @@ pub enum LightingMode {
     /// Let the keyboard firmware render one of its 13 effects.
     #[default]
     Hardware,
-    /// Per-key colours painted here (static or animated).
+    /// Per-key colours painted here.
     Custom,
     /// Audio reactive.
     Music,
     /// Screen ambilight.
     Screen,
+    /// A still picture mapped onto the key positions.
+    Picture,
 }
 
 impl LightingMode {
-    pub const ALL: [LightingMode; 4] = [
+    pub const ALL: [LightingMode; 5] = [
         LightingMode::Hardware,
         LightingMode::Custom,
+        LightingMode::Picture,
         LightingMode::Music,
         LightingMode::Screen,
     ];
@@ -69,6 +72,7 @@ impl LightingMode {
             LightingMode::Custom => "Custom per-key",
             LightingMode::Music => "Music reactive",
             LightingMode::Screen => "Screen follow",
+            LightingMode::Picture => "Picture",
         }
     }
 
@@ -78,6 +82,49 @@ impl LightingMode {
             LightingMode::Custom => "Custom",
             LightingMode::Music => "Music",
             LightingMode::Screen => "Screen",
+            LightingMode::Picture => "Picture",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageFit {
+    /// Fill the keyboard, cropping the edges of the picture if needed.
+    #[default]
+    Cover,
+    /// Show the whole picture, leaving black bars at the sides or top.
+    Contain,
+    /// Stretch the picture to the keyboard's bounding box.
+    Stretch,
+}
+
+impl ImageFit {
+    pub const ALL: [ImageFit; 3] = [ImageFit::Cover, ImageFit::Contain, ImageFit::Stretch];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ImageFit::Cover => "Cover (crop edges)",
+            ImageFit::Contain => "Contain (black bars)",
+            ImageFit::Stretch => "Stretch (fill keys)",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PictureConfig {
+    /// Path to the last image chosen in the file picker.
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub fit: ImageFit,
+}
+
+impl Default for PictureConfig {
+    fn default() -> Self {
+        PictureConfig {
+            path: String::new(),
+            fit: ImageFit::Cover,
         }
     }
 }
@@ -210,6 +257,39 @@ impl CustomLayer {
             *slot = color;
         }
     }
+
+    /// Spread `stops` left to right across the physical key centres, so the
+    /// leftmost key starts at the first stop and the right-hand column arrives
+    /// at the last one.
+    pub fn fill_gradient(&mut self, layout: &Layout, stops: &[[u8; 3]]) {
+        if stops.is_empty() {
+            return;
+        }
+        let center = |key: &crate::model::layout::KeyDef| key.x + key.w * 0.5;
+        let min = layout.keys.iter().map(center).fold(f32::INFINITY, f32::min);
+        let max = layout
+            .keys
+            .iter()
+            .map(center)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let span = (max - min).max(0.001);
+        for key in &layout.keys {
+            let t = ((center(key) - min) / span).clamp(0.0, 1.0);
+            let scaled = t * (stops.len() - 1) as f32;
+            let from = scaled.floor() as usize;
+            let to = (from + 1).min(stops.len() - 1);
+            let blend = scaled - from as f32;
+            let a = stops[from];
+            let b = stops[to];
+            if let Some(slot) = self.keys.get_mut(key.index) {
+                *slot = [
+                    (a[0] as f32 + (b[0] as f32 - a[0] as f32) * blend).round() as u8,
+                    (a[1] as f32 + (b[1] as f32 - a[1] as f32) * blend).round() as u8,
+                    (a[2] as f32 + (b[2] as f32 - a[2] as f32) * blend).round() as u8,
+                ];
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -219,58 +299,8 @@ pub struct CustomPreset {
     pub keys: Vec<[u8; 3]>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Keyframe {
-    #[serde(default)]
-    pub t_ms: u32,
-    #[serde(default)]
-    pub keys: Vec<[u8; 3]>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct AnimPreset {
-    pub name: String,
-    #[serde(default = "default_fps")]
-    pub fps: u8,
-    #[serde(default = "default_half")]
-    pub speed: u8,
-    #[serde(default)]
-    pub direction: Direction,
-    #[serde(default)]
-    pub keyframes: Vec<Keyframe>,
-}
-
-fn default_fps() -> u8 {
-    30
-}
-
 fn default_half() -> u8 {
     50
-}
-
-impl Default for AnimPreset {
-    fn default() -> Self {
-        AnimPreset {
-            name: "New animation".into(),
-            fps: 30,
-            speed: 50,
-            direction: Direction::Right,
-            keyframes: Vec::new(),
-        }
-    }
-}
-
-impl AnimPreset {
-    pub fn ensure_len(&mut self, len: usize) {
-        for frame in &mut self.keyframes {
-            frame.keys.resize(len, [0, 0, 0]);
-        }
-        self.keyframes.sort_by_key(|f| f.t_ms);
-    }
-
-    pub fn duration_ms(&self) -> u32 {
-        self.keyframes.last().map(|f| f.t_ms).unwrap_or(0).max(1)
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -304,33 +334,12 @@ pub enum MusicVisual {
     Twinkle,
 }
 
-impl MusicVisual {
-    pub const ALL: [MusicVisual; 4] = [
-        MusicVisual::Equalizer,
-        MusicVisual::Pulse,
-        MusicVisual::Wave,
-        MusicVisual::Twinkle,
-    ];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            MusicVisual::Equalizer => "Equalizer",
-            MusicVisual::Pulse => "Pulse",
-            MusicVisual::Wave => "Wave",
-            MusicVisual::Twinkle => "Twinkle",
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MusicConfig {
     #[serde(default)]
     pub source: AudioSource,
     #[serde(default = "default_sensitivity")]
     pub sensitivity: f32,
-    /// 0 = jump instantly, 0.95 = very slow.
-    #[serde(default = "default_smoothing")]
-    pub smoothing: f32,
     #[serde(default = "default_gain")]
     pub gain: f32,
     #[serde(default = "default_color_speed")]
@@ -339,16 +348,10 @@ pub struct MusicConfig {
     pub visual: MusicVisual,
     #[serde(default = "default_beat_boost")]
     pub beat_boost: f32,
-    /// Debug aid: show the raw band meter in the UI.
-    #[serde(default = "default_true")]
-    pub show_meter: bool,
 }
 
 fn default_sensitivity() -> f32 {
     1.4
-}
-fn default_smoothing() -> f32 {
-    0.35
 }
 fn default_gain() -> f32 {
     1.0
@@ -365,12 +368,10 @@ impl Default for MusicConfig {
         MusicConfig {
             source: AudioSource::Loopback,
             sensitivity: default_sensitivity(),
-            smoothing: default_smoothing(),
             gain: default_gain(),
             color_speed: default_color_speed(),
             visual: MusicVisual::Equalizer,
             beat_boost: default_beat_boost(),
-            show_meter: true,
         }
     }
 }
@@ -468,13 +469,9 @@ pub struct Lighting {
     #[serde(default)]
     pub custom: CustomLayer,
     #[serde(default)]
-    pub animation: AnimPreset,
-    #[serde(default)]
-    pub animation_playing: bool,
+    pub picture: PictureConfig,
     #[serde(default)]
     pub presets: Vec<CustomPreset>,
-    #[serde(default)]
-    pub animations: Vec<AnimPreset>,
     #[serde(default)]
     pub music: MusicConfig,
     #[serde(default)]
@@ -487,10 +484,6 @@ fn default_effect() -> usize {
 fn default_brightness() -> u8 {
     80
 }
-fn default_true() -> bool {
-    true
-}
-
 pub fn default_palette() -> [[u8; 3]; PALETTE_SLOTS] {
     [
         [255, 40, 40],   // red
@@ -528,16 +521,8 @@ impl Lighting {
             speed: 50,
             direction: Direction::Right,
             custom: CustomLayer::default(),
-            animation: AnimPreset {
-                name: "Pulse".into(),
-                fps: 30,
-                speed: 50,
-                direction: Direction::Right,
-                keyframes: Vec::new(),
-            },
-            animation_playing: true,
+            picture: PictureConfig::default(),
             presets: Vec::new(),
-            animations: Vec::new(),
             music: MusicConfig::default(),
             screen: ScreenConfig::default(),
         };
@@ -545,17 +530,6 @@ impl Lighting {
         lighting
             .custom
             .fill([base[0] / 4, base[1] / 4, base[2] / 4]);
-        let dim = [base[0] / 10, base[1] / 10, base[2] / 10];
-        lighting.animation.keyframes = vec![
-            Keyframe {
-                t_ms: 0,
-                keys: vec![base; KEY_COUNT],
-            },
-            Keyframe {
-                t_ms: 900,
-                keys: vec![dim; KEY_COUNT],
-            },
-        ];
         lighting
     }
 
@@ -569,22 +543,35 @@ impl Lighting {
 
     pub fn ensure_len(&mut self, len: usize) {
         self.custom.ensure_len(len);
-        self.animation.ensure_len(len);
         for preset in &mut self.presets {
             preset.keys.resize(len, [0, 0, 0]);
-        }
-        for anim in &mut self.animations {
-            anim.ensure_len(len);
         }
         self.effect = self.effect.min(HARDWARE_EFFECTS.len() - 1);
         self.speed = self.speed.min(100);
         self.brightness = self.brightness.min(100);
         self.music.sensitivity = self.music.sensitivity.clamp(0.1, 5.0);
-        self.music.smoothing = self.music.smoothing.clamp(0.0, 0.95);
         self.screen.fps = self.screen.fps.clamp(5, 30);
         self.screen.smoothing = self.screen.smoothing.clamp(0.0, 0.95);
         self.screen.saturation = self.screen.saturation.clamp(0.0, 3.0);
         self.screen.grid_x = self.screen.grid_x.clamp(4, 32);
         self.screen.grid_y = self.screen.grid_y.clamp(2, 16);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::layout::layout;
+
+    #[test]
+    fn custom_gradient_spans_the_keyboard() {
+        let layout = layout();
+        let stops = [[255, 0, 0], [0, 255, 0], [255, 255, 255], [255, 0, 255]];
+        let mut layer = CustomLayer::default();
+        layer.ensure_len(layout.len());
+        layer.fill_gradient(&layout, &stops);
+        assert_eq!(layer.keys[0], stops[0]);
+        let right = layout.index_of_vk(0x27).expect("right arrow");
+        assert_eq!(layer.keys[right], stops[3]);
     }
 }

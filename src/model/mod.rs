@@ -8,6 +8,7 @@ pub mod keycode;
 pub mod layout;
 pub mod lighting;
 pub mod macro_def;
+pub mod picture;
 pub mod profile;
 pub mod store;
 

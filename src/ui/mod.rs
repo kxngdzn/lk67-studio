@@ -52,7 +52,7 @@ impl Page {
             Page::Tester => "Key tester",
             Page::Music => "Music reactive",
             Page::Screen => "Screen follow",
-            Page::Driver => "Driver & packets",
+            Page::Driver => "Driver",
             Page::Settings => "Settings",
         }
     }
@@ -60,14 +60,14 @@ impl Page {
     pub fn hint(self) -> &'static str {
         match self {
             Page::Remap => "Assign keys, combos and macros on both layers.",
-            Page::Lighting => "13 hardware effects, 14-colour palette and custom per-key layouts.",
+            Page::Lighting => "Hardware effects, palettes, custom layouts and picture playback.",
             Page::Macros => "Record, edit and test key sequences with delays and repeats.",
             Page::Tester => {
                 "Live switch tester: press counts, hold times and a heatmap from real keys."
             }
             Page::Music => "WASAPI loopback or microphone driven by FFT band analysis.",
             Page::Screen => "Map screen colours onto the keyboard (ambilight).",
-            Page::Driver => "HID discovery, protocol placeholders and the packet log.",
+            Page::Driver => "Connection status and onboard keymap maintenance.",
             Page::Settings => "Runtime options, FN key and software remapping.",
         }
     }
@@ -171,13 +171,10 @@ pub struct UiState {
     pub step_delay: u32,
 
     pub preset_name: String,
-    pub anim_name: String,
     pub stream_to_device: bool,
 
     pub audio_requested: bool,
     pub screen_requested: bool,
-
-    pub packet_hex: bool,
 
     pub tester_counts: Vec<u32>,
     pub tester_last: Vec<Option<Instant>>,
@@ -228,11 +225,9 @@ impl Default for UiState {
             step_key: KeyCode(0x41),
             step_delay: 40,
             preset_name: String::new(),
-            anim_name: String::new(),
             stream_to_device: true,
             audio_requested: false,
             screen_requested: false,
-            packet_hex: true,
             tester_counts: vec![0; KEY_COUNT],
             tester_last: vec![None; KEY_COUNT],
             tester_hold_ms: vec![0; KEY_COUNT],

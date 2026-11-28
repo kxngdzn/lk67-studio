@@ -58,7 +58,7 @@ pub fn draw(app: &mut App, ui: &mut egui::Ui) {
             );
             theme::hint(
                 ui,
-                "Old swaps written by earlier builds are cleared with Driver & packets → Clear onboard remaps.",
+                "Old swaps written by earlier builds are cleared with Driver → Clear onboard remaps.",
             );
             theme::hint(
                 ui,
@@ -72,12 +72,6 @@ pub fn draw(app: &mut App, ui: &mut egui::Ui) {
                 .checkbox(
                     &mut app.cfg.settings.sync_profile_to_hardware,
                     "Ask the firmware to switch profile slots",
-                )
-                .changed();
-            changed |= ui
-                .checkbox(
-                    &mut app.cfg.settings.log_packets,
-                    "Keep packet log entries",
                 )
                 .changed();
             let mut fps = app.cfg.settings.stream_fps as f32;

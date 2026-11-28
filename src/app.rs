@@ -1,19 +1,21 @@
 //! Application shell: owns all live state and drives the UI, driver and RGB engine.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
 
-use crate::driver::{DeviceStatus, HidRecord, KeyboardDriver, Lk67Driver};
+use crate::driver::{DeviceStatus, KeyboardDriver, Lk67Driver};
 use crate::input::{
     HookCommand, HookConfig, HookHandle, KnobEvent, KnobWatcher, MacroPlayer, PlayerStatus,
     RawKeyEvent, start_hook,
 };
 use crate::model::action::RgbCommand;
 use crate::model::layout::{KEY_COUNT, layout};
-use crate::model::lighting::{AudioSource, LightingMode, ScreenConfig};
+use crate::model::lighting::{AudioSource, ImageFit, LightingMode, ScreenConfig};
+use crate::model::picture::Picture;
 use crate::model::profile::KnobTurn;
 use crate::model::{Action, Config, Layer};
 use crate::rgb::{
@@ -36,7 +38,12 @@ pub struct App {
     pub ui: UiState,
     pub audio_snap: AudioSnapshot,
     pub screen_snap: ScreenSnapshot,
-    pub devices: Vec<HidRecord>,
+    /// Decoded picture effect for the active profile.
+    pub picture: Option<Picture>,
+    pub picture_error: Option<String>,
+    /// Path and fit currently loaded or attempted, so a broken file is not
+    /// retried on every repaint.
+    pub picture_attempt: Option<(PathBuf, ImageFit)>,
     pub last_frame: Instant,
     pub save_due: Option<Instant>,
     pub saved_at: Option<Instant>,
@@ -86,7 +93,6 @@ impl App {
         if !cfg.settings.dry_run {
             driver.rescan();
         }
-        let devices = driver.discover();
 
         let mut ui = UiState::default();
         ui.paint_color = cfg.profile().lighting.colors[0];
@@ -114,7 +120,9 @@ impl App {
             ui,
             audio_snap: AudioSnapshot::default(),
             screen_snap: ScreenSnapshot::default(),
-            devices,
+            picture: None,
+            picture_error: None,
+            picture_attempt: None,
             last_frame: Instant::now(),
             save_due: None,
             saved_at: None,
@@ -132,6 +140,7 @@ impl App {
         // Push the active profile's lighting on launch: the board keeps whichever
         // mode it was last left in, including host-fed music/screen modes.
         let mut app = app;
+        app.sync_picture();
         app.ui.apply_lighting = true;
         app.tray = crate::tray::build(&cc.egui_ctx, app.quitting.clone());
         if app.tray.is_none() {
@@ -147,6 +156,82 @@ impl App {
 
     pub fn notify(&mut self, message: impl Into<String>) {
         self.ui.notify(message);
+    }
+
+    /// Load the picture configured for the active profile. Called by the
+    /// picture page.
+    pub fn load_picture(&mut self) {
+        self.picture_attempt = None;
+        self.sync_picture();
+        let message = if let Some(picture) = &self.picture {
+            format!(
+                "Loaded {}",
+                picture
+                    .path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| picture.path.display().to_string())
+            )
+        } else if let Some(err) = &self.picture_error {
+            format!("Picture load failed: {err}")
+        } else {
+            "Choose a picture first".into()
+        };
+        self.ui.notify(message);
+        self.ui.dirty = true;
+    }
+
+    /// Keep the decoded picture in sync with the active profile's path and fit.
+    /// A failed load is remembered until the setting changes or Reload is hit.
+    fn sync_picture(&mut self) {
+        let (mode, path, fit) = {
+            let lighting = &self.cfg.profile().lighting;
+            (
+                lighting.mode,
+                lighting.picture.path.trim().to_string(),
+                lighting.picture.fit,
+            )
+        };
+        if mode != LightingMode::Picture || path.is_empty() {
+            self.picture = None;
+            self.picture_error = None;
+            self.picture_attempt = None;
+            return;
+        }
+        let path = PathBuf::from(path);
+        let attempt = (path.clone(), fit);
+        if self.picture_attempt.as_ref() == Some(&attempt) {
+            return;
+        }
+        self.picture_attempt = Some(attempt);
+        match Picture::load(&path, layout(), fit) {
+            Ok(picture) => {
+                self.picture = Some(picture);
+                self.picture_error = None;
+            }
+            Err(err) => {
+                self.picture = None;
+                self.picture_error = Some(err);
+            }
+        }
+    }
+
+    /// Send the mapped picture to the keyboard's flash as one still image.
+    pub fn upload_picture(&mut self) {
+        if self.ui.lighting_uploading {
+            self.ui
+                .notify("A per-key picture upload is already running");
+            return;
+        }
+        let Some(keys) = self.picture.as_ref().map(|picture| picture.keys.clone()) else {
+            self.ui.notify("Choose a picture before sending it");
+            return;
+        };
+        let lighting = &mut self.cfg.profile_mut().lighting;
+        lighting.custom.keys = keys;
+        lighting.custom.ensure_len(KEY_COUNT);
+        self.ui.dirty = true;
+        self.upload_key_picture();
     }
 
     pub fn save_now(&mut self) {
@@ -258,10 +343,12 @@ impl App {
         }
         // Sending the picture is also the request to show it, so the profile and
         // the board agree on the output mode afterwards.
-        let profile = self.cfg.profile_mut();
-        profile.lighting.mode = LightingMode::Custom;
-        profile.lighting.animation_playing = false;
-        let lighting = profile.lighting.clone();
+        self.cfg.profile_mut().lighting.mode = LightingMode::Custom;
+        self.upload_key_picture();
+    }
+
+    fn upload_key_picture(&mut self) {
+        let lighting = self.cfg.profile().lighting.clone();
         self.ui.dirty = true;
         let pages =
             crate::driver::lk67::build_key_color_reports(&self.cfg.driver, &lighting.custom.keys)
@@ -269,7 +356,7 @@ impl App {
         if self.cfg.settings.dry_run {
             match self.driver.upload_custom_layout(&lighting) {
                 Ok(count) => self.ui.notify(format!(
-                    "Dry-run: {count} packet(s) logged, nothing written"
+                    "Dry-run: {count} packet(s) validated, nothing written"
                 )),
                 Err(err) => self.ui.notify(format!("Per-key upload failed: {err}")),
             }
@@ -408,12 +495,6 @@ impl App {
         self.ui.apply_lighting = true;
         self.ui.dirty = true;
         self.ui.notify("Lighting updated from keyboard command");
-    }
-
-    pub fn refresh_devices(&mut self) {
-        self.devices = self.driver.discover();
-        self.ui
-            .notify(format!("Found {} HID interfaces", self.devices.len()));
     }
 
     pub fn load_action_into_editor(&mut self, index: usize) {
@@ -722,6 +803,9 @@ impl App {
             self.ui.audio_requested = lighting_mode == LightingMode::Music;
             self.ui.screen_requested = lighting_mode == LightingMode::Screen;
         }
+        if lighting_mode == LightingMode::Picture {
+            self.sync_picture();
+        }
 
         // Audio capture lifecycle.
         let source = self.cfg.profile().lighting.music.source;
@@ -768,9 +852,10 @@ impl App {
                 screen: &self.screen_snap,
             };
             let profile = self.cfg.profile();
+            let picture = self.picture.as_ref().map(|picture| picture.keys.as_slice());
             let colors = self
                 .engine
-                .render(&profile.lighting, layout(), dt, &live)
+                .render(&profile.lighting, layout(), dt, &live, picture)
                 .to_vec();
             self.colors = colors;
         }
@@ -967,10 +1052,6 @@ impl App {
                 }
                 if !response.painted.is_empty() || response.right_clicked.is_some() {
                     profile.lighting.mode = LightingMode::Custom;
-                    // A playing animation would override the painted layout in
-                    // the preview and in every frame, so painting pins the
-                    // static picture instead.
-                    profile.lighting.animation_playing = false;
                     self.ui.dirty = true;
                     self.ui.lighting_edit_at = None;
                 }
@@ -1037,7 +1118,7 @@ impl App {
                 self.cfg.settings.dry_run = dry;
                 self.driver.set_dry_run(dry);
                 self.ui.notify(if dry {
-                    "Dry-run enabled: packets are logged, never written"
+                    "Dry-run enabled: packets are validated, never written"
                 } else {
                     "Hardware mode: HID writes enabled"
                 });
@@ -1068,9 +1149,6 @@ impl App {
             let response = ui.selectable_label(selected, text);
             if response.clicked() {
                 self.ui.page = page;
-                if page == Page::Driver && self.devices.is_empty() {
-                    self.refresh_devices();
-                }
             }
             response.on_hover_text(page.hint());
         }
@@ -1110,7 +1188,7 @@ impl App {
                             .color(theme::WARN),
                     );
                     ui.label(
-                        egui::RichText::new("Packets are validated + logged")
+                        egui::RichText::new("Packets are validated, never written")
                             .size(10.5)
                             .color(theme::MUTED),
                     );
@@ -1155,12 +1233,11 @@ impl App {
 
     fn status_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            let (color, text) = match self.driver.status() {
-                DeviceStatus::Connected { .. } => (theme::OK, "LIVE"),
-                DeviceStatus::Simulation => (theme::WARN, "DRY-RUN"),
-                DeviceStatus::Disconnected => (theme::DANGER, "OFFLINE"),
-            };
-            theme::badge(ui, text, color);
+            match self.driver.status() {
+                DeviceStatus::Connected { .. } => {}
+                DeviceStatus::Simulation => theme::badge(ui, "DRY-RUN", theme::WARN),
+                DeviceStatus::Disconnected => theme::badge(ui, "OFFLINE", theme::DANGER),
+            }
             ui.label(
                 egui::RichText::new(self.driver.status().label())
                     .size(11.0)
@@ -1400,10 +1477,8 @@ impl eframe::App for App {
             }
         }
 
-        let live = self.ui.audio_requested
-            || self.ui.screen_requested
-            || self.cfg.profile().lighting.animation_playing
-            || self.activity.any_pressed();
+        let live =
+            self.ui.audio_requested || self.ui.screen_requested || self.activity.any_pressed();
         ui.ctx()
             .request_repaint_after(Duration::from_millis(if live { 16 } else { 40 }));
     }
